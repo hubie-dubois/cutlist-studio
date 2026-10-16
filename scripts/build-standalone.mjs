@@ -1,0 +1,16 @@
+import {readFile,writeFile} from 'node:fs/promises';
+const read = p => readFile(new URL('../'+p,import.meta.url),'utf8');
+const optimizer=(await read('dist/optimizer.mjs')).replaceAll('export function','function');
+const csv=(await read('dist/csv.mjs')).replaceAll('export function','function');
+const worker=(await read('dist/worker.mjs')).replace(/^import .*\n/,'');
+let app=(await read('dist/app.mjs')).replace(/^import .*\n/gm,'').replaceAll('export function','function');
+const workerSource=JSON.stringify(optimizer+'\n'+worker);
+app=app.replace("new Worker('./worker.mjs',{type:'module'})",'new Worker(standaloneWorkerURL)');
+const standaloneSetup=`const standaloneWorkerURL=URL.createObjectURL(new Blob([${workerSource}],{type:'text/javascript'}));`;
+let html=(await read('dist/index.html')).replace('href="./"','href="#"');
+const icon='data:image/svg+xml;base64,'+Buffer.from(await read('dist/icon.svg')).toString('base64');
+html=html.replaceAll('href="icon.svg"',`href="${icon}"`).replaceAll('src="icon.svg"',`src="${icon}"`);
+html=html.replace('<link rel="stylesheet" href="style.css">',`<style>${await read('dist/style.css')}</style>`).replace('<script type="module" src="app.mjs"></script>','');
+html=html.replace('</body>',`<script type="module">${(optimizer+'\n'+csv+'\n'+standaloneSetup+'\n'+app).replaceAll('</script','<\\/script')}</script></body>`);
+await writeFile(new URL('../Cutlist Studio.html',import.meta.url),html);
+console.log('Created Cutlist Studio.html — open directly in a browser.');
