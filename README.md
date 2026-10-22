@@ -10,6 +10,14 @@ Double-click **Cutlist Studio.html** for the self-contained, offline version. No
 
 `npm test` runs the optimizer's physical-invariant and regression tests.
 
+## Website deployment
+
+The live app is at https://cut-list.hubiedubois.com/.
+
+GitHub Pages uses **GitHub Actions** as its publishing source. The workflow in `.github/workflows/pages.yml` runs the tests and publishes only `dist/` whenever `main` changes. It can also be run manually from the Actions tab. The website files are ready to deploy; `npm run build` only regenerates the separate offline HTML download.
+
+Keep the custom domain set to `cut-list.hubiedubois.com` in the repository's Pages settings. Publishing the repository root instead would display this README because the app's entry point is `dist/index.html`.
+
 ## Use
 
 Enter finished cutting dimensions and stock quantities, then choose **Optimize layout**. Length is horizontal and follows the stock grain; locking a part's grain prevents rotation. Dimensions support decimal values and fractions such as `24 1/2`. Switching mm/in converts dimensions.
