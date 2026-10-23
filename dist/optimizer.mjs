@@ -1,20 +1,21 @@
 const EPS = 1e-7;
-export function validate(project) {
+export function validate(project, {draft = false} = {}) {
   const errors = [];
   if (!project || !Array.isArray(project.parts) || !Array.isArray(project.stock) || !project.settings) return ['Invalid project file.'];
   for (const [key, label] of [['parts', 'Part'], ['stock', 'Stock']]) {
-    if (!project[key].length) errors.push(`Add at least one ${label.toLowerCase()} row.`);
+    if (!draft && !project[key].length) errors.push(`Add at least one ${label.toLowerCase()} row.`);
     if (project[key].length > 200) errors.push(`Use at most 200 ${label.toLowerCase()} rows.`);
     const ids = new Set();
     project[key].forEach((p, i) => {
+      if (!p || typeof p !== 'object') {errors.push(`${label} ${i + 1}: invalid row.`);return;}
       if (typeof p.id !== 'string' || ids.has(p.id)) errors.push(`${label} ${i + 1}: invalid or duplicate ID.`);
       ids.add(p.id);
-      for (const dim of ['length', 'width']) if (!Number.isFinite(p[dim]) || p[dim] <= 0 || p[dim] > 100000) errors.push(`${label} ${i + 1}: ${dim} must be greater than 0 and at most 100,000 mm.`);
+      for (const dim of ['length', 'width']) if (!(draft && p[dim] === null) && (!Number.isFinite(p[dim]) || p[dim] <= 0 || p[dim] > 100000)) errors.push(`${label} ${i + 1}: ${dim} must be greater than 0 and at most 100,000 mm.`);
       if (!Number.isInteger(p.qty) || p.qty < 1 || p.qty > 500) errors.push(`${label} ${i + 1}: quantity must be 1–500.`);
       if (typeof p.label !== 'string' || typeof p.material !== 'string' || p.label.length > 100 || p.material.length > 100) errors.push(`${label} ${i + 1}: use labels and materials under 100 characters.`);
       if (key === 'parts' && p.edges && !/^[TBLR]*$/.test(p.edges)) errors.push(`${label} ${i + 1}: edges must use T, B, L, R.`);
     });
-    if (project[key].reduce((sum, p) => sum + p.qty, 0) > 500) errors.push(`Use at most 500 total ${key === 'parts' ? 'pieces' : 'sheets'}.`);
+    if (project[key].reduce((sum, p) => sum + (p?.qty || 0), 0) > 500) errors.push(`Use at most 500 total ${key === 'parts' ? 'pieces' : 'sheets'}.`);
   }
   for (const key of ['kerf', 'trim']) if (!Number.isFinite(project.settings[key]) || project.settings[key] < 0 || project.settings[key] > 1000) errors.push(`${key === 'kerf' ? 'Saw kerf' : 'Edge trim'} must be 0–1,000 mm.`);
   if (!['mm', 'in'].includes(project.settings.unit)) errors.push('Choose millimeters or inches.');
@@ -89,17 +90,23 @@ function run(project, sortMode, splitMode, fitMode) {
   const cutLength = sheets.reduce((sum,s) => sum+s.cuts.reduce((a,c) => a+c.length,0),0);
   return {sheets,unplaced,usedArea,stockArea,cutLength,utilization:stockArea ? usedArea/stockArea*100 : 0,cutCount:sheets.reduce((sum,s)=>sum+s.cuts.length,0)};
 }
-export function optimize(project) {
+export function optimize(project, onProgress = () => {}) {
   const errors = validate(project);
   if (errors.length) throw new Error(errors.join('\n'));
-  let best;
+  let best, completed = 0;
+  const total = 512;
   const consider = result => {
     const rank = r => [r.unplaced.length, project.settings.priority === 'cuts' ? r.cutCount : r.stockArea, project.settings.priority === 'cuts' ? r.stockArea : r.cutCount, r.cutLength];
     const a = rank(result), b = best && rank(best);
     if (!best || a.some((n,i) => n < b[i] && a.slice(0,i).every((v,j) => v === b[j]))) best = result;
+    completed++;
+    onProgress({completed,total,phase:completed<=32?'Comparing cut directions':completed<=80?'Exploring part orders':'Refining the best layout',best:{sheets:best.sheets.length,unplaced:best.unplaced.length,utilization:best.utilization,cutCount:best.cutCount}});
   };
+  onProgress({completed:0,total,phase:'Preparing your pieces',best:null});
   for(let order=0;order<4;order++) for(let split=0;split<4;split++) for(let fit=0;fit<2;fit++) consider(run(project,order,split,fit));
   for(let seed=4;seed<52;seed++) consider(run(project,seed,seed%4,seed%2));
+  // Keep all original strategies, then explore additional orders with every split/fit combination.
+  for(let seed=52;seed<106;seed++) for(let split=0;split<4;split++) for(let fit=0;fit<2;fit++) consider(run(project,seed,split,fit));
   return best;
 }
 export function parseDimension(value, unit='mm') {

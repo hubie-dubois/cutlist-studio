@@ -1,3 +1,4 @@
+import {emptyProject, sampleProject, restoreProject} from './project.mjs';
 import {parseCSV} from './csv.mjs';
 import {validate, parseDimension, diagnoseFit} from './optimizer.mjs';
 const $ = id => document.getElementById(id);
@@ -7,31 +8,30 @@ document.querySelectorAll('[data-icon]').forEach(el => el.innerHTML=icon(el.data
 const palette=[['#d8e6f7','#6787b4'],['#e4def3','#9180b6'],['#f4e3cd','#b79b72'],['#dcebe1','#789c87'],['#f3dde2','#b0808c'],['#dcebed','#7da0a7'],['#e9e6d7','#a39a75'],['#e1e1ed','#9090b4']];
 const uid=()=>crypto.randomUUID();
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const sample=()=>({version:1,id:uid(),name:'The weekend bookcase',parts:[['Side panels',720,380,2],['Shelves',564,360,4],['Doors',716,296,2],['Top & base',600,400,2]].map(([label,length,width,qty])=>({id:uid(),label,length,width,qty,material:'Birch plywood',grain:false,edges:''})),stock:[{id:uid(),label:'Birch plywood',length:2440,width:1220,qty:3,material:'Birch plywood'}],settings:{unit:'mm',kerf:3,trim:5,rotation:true,materials:true,singleSheet:false,priority:'material'}});
 const STORAGE='cutlist-studio-v1';
-let library=[],project=sample(),result=null,resultProject=null,sheetIndex=0,view='layout',selected=null,worker=null,revision=0,dirty=false,toastTimer;
-try{const saved=JSON.parse(localStorage.getItem(STORAGE)||'null');if(saved){library=Array.isArray(saved.library)?saved.library.filter(p=>!validate(p).length):[];if(saved.current&&!validate(saved.current).length) project=saved.current;}}catch{ /* A blocked or invalid store must not prevent editing. */ }
-function display(n){return Number((n/(project.settings.unit==='in'?25.4:1)).toFixed(project.settings.unit==='in'?4:3)).toString();}
+let library=[],project=emptyProject(),result=null,resultProject=null,sheetIndex=0,view='layout',selected=null,worker=null,revision=0,dirty=false,toastTimer,clearedProject=null,startedAt=0;
+try{const saved=JSON.parse(localStorage.getItem(STORAGE)||'null');if(saved){library=Array.isArray(saved.library)?saved.library.filter(p=>!validate(p).length):[];project=restoreProject(saved);}}catch{ /* A blocked or invalid store must not prevent editing. */ }
+function display(n){if(n===null||!Number.isFinite(n))return '';return Number((n/(project.settings.unit==='in'?25.4:1)).toFixed(project.settings.unit==='in'?4:3)).toString();}
 const dimension=n=>`${display(n)} ${project.settings.unit}`;
 function toast(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4000);}
-function persist(){try{localStorage.setItem(STORAGE,JSON.stringify({current:project,library}));$('saved-status').innerHTML='<span class="status-dot"></span> Saved on this device';return true;}catch{$('saved-status').textContent='Browser storage unavailable · export a backup';return false;}}
-function changed(){revision++;dirty=true;if(worker){worker.terminate();worker=null;setBusy(false);}persist();renderDiagnostics();if(result)feedback('Your inputs changed. Optimize again to update this plan.');}
+function persist(){try{localStorage.setItem(STORAGE,JSON.stringify({current:project,library,blankStart:true}));$('saved-status').innerHTML='<span class="status-dot"></span> Saved on this device';return true;}catch{$('saved-status').textContent='Browser storage unavailable · export a backup';return false;}}
+function changed(){revision++;dirty=true;$('search-progress').hidden=true;if(worker){worker.terminate();worker=null;setBusy(false);}persist();renderDiagnostics();if(result)feedback('Your inputs changed. Optimize again to update this plan.');}
 function feedback(message,error=false){$('feedback').hidden=!message;$('feedback').className='feedback'+(error?' error':'');$('feedback').textContent=message;}
 function renderDiagnostics() {
- const errors=validate(project);
+ const errors=project.parts.length||project.stock.length?validate(project):[];
  const issues=errors.length ? errors : [...new Set(project.parts.flatMap(p=>diagnoseFit(project,p).map(i=>i.message)))];
  $('input-feedback').hidden=!issues.length;
  $('input-feedback').innerHTML=issues.length?`<strong>Check these settings</strong><ul>${issues.map(message=>`<li>${esc(message)}</li>`).join('')}</ul>`:'';
 }
-function row(p,i,type){return `<tr data-id="${esc(p.id)}" data-type="${type}"><td><div class="row-name">${type==='parts'?`<span class="color-dot" style="background:${palette[i%palette.length][1]}"></span>`:''}<input class="name-input" data-field="label" aria-label="${type==='parts'?'Part':'Stock'} ${i+1} name" maxlength="100" value="${esc(p.label)}"></div></td><td><input data-field="length" inputmode="decimal" aria-label="${esc(p.label)} length" value="${display(p.length)}"></td><td><input data-field="width" inputmode="decimal" aria-label="${esc(p.label)} width" value="${display(p.width)}"></td><td><input data-field="qty" type="number" min="1" max="500" step="1" aria-label="${esc(p.label)} quantity" value="${p.qty}"></td><td><button class="delete-row" data-delete aria-label="Remove ${esc(p.label)}">×</button></td></tr>`;}
+function row(p,i,type){return `<tr data-id="${esc(p.id)}" data-type="${type}"><td><div class="row-name">${type==='parts'?`<span class="color-dot" style="background:${palette[i%palette.length][1]}"></span>`:''}<input class="name-input" data-field="label" aria-label="${type==='parts'?'Part':'Stock'} ${i+1} name" maxlength="100" placeholder="${type==='parts'?'Part name':'Stock name'}" value="${esc(p.label)}"></div></td><td><input data-field="length" inputmode="decimal" aria-label="${type==='parts'?'Part':'Stock'} ${i+1} length" placeholder="—" value="${display(p.length)}"></td><td><input data-field="width" inputmode="decimal" aria-label="${type==='parts'?'Part':'Stock'} ${i+1} width" placeholder="—" value="${display(p.width)}"></td><td><input data-field="qty" type="number" min="1" max="500" step="1" aria-label="${type==='parts'?'Part':'Stock'} ${i+1} quantity" value="${p.qty}"></td><td><button class="delete-row" data-delete aria-label="Remove ${esc(p.label||(type==='parts'?'part ':'stock ')+(i+1))}">×</button></td></tr>`;}
 function renderDetails(){
  $('part-details').innerHTML=project.parts.map((p,i)=>`<div class="detail-row" data-type="parts" data-id="${esc(p.id)}"><span title="${esc(p.label)}">${esc(p.label||'Part '+(i+1))}</span><input type="text" data-field="material" maxlength="100" aria-label="${esc(p.label)} material" value="${esc(p.material)}"><label><input type="checkbox" data-field="grain" ${p.grain?'checked':''}> Lock grain</label><label>Band <select data-field="edges" aria-label="${esc(p.label)} edge banding"><option value="" ${!p.edges?'selected':''}>None</option><option value="T" ${p.edges==='T'?'selected':''}>Top</option><option value="TB" ${p.edges==='TB'?'selected':''}>Top + bottom</option><option value="LR" ${p.edges==='LR'?'selected':''}>Left + right</option><option value="TBLR" ${p.edges==='TBLR'?'selected':''}>All edges</option>${p.edges&&!['T','TB','LR','TBLR'].includes(p.edges)?`<option selected value="${esc(p.edges)}">${esc(p.edges)}</option>`:''}</select></label></div>`).join('');
  $('stock-details').innerHTML=project.stock.map(p=>`<div class="detail-row" data-type="stock" data-id="${esc(p.id)}"><span>${esc(p.label)}</span><input type="text" data-field="material" maxlength="100" aria-label="${esc(p.label)} stock material" value="${esc(p.material)}"></div>`).join('');
 }
 function renderInputs(){
  $('project-name').value=project.name;
- $('parts-body').innerHTML=project.parts.map((p,i)=>row(p,i,'parts')).join('');
- $('stock-body').innerHTML=project.stock.map((p,i)=>row(p,i,'stock')).join('');
+ $('parts-body').innerHTML=project.parts.map((p,i)=>row(p,i,'parts')).join('')||'<tr><td colspan="5" class="empty-table">No parts yet. Add your first piece below.</td></tr>';
+ $('stock-body').innerHTML=project.stock.map((p,i)=>row(p,i,'stock')).join('')||'<tr><td colspan="5" class="empty-table">Add the stock you have on hand.</td></tr>';
  $('part-summary').textContent=`${project.parts.reduce((s,p)=>s+(p.qty||0),0)} pieces · ${project.parts.length} unique parts`;
  document.querySelectorAll('.unit-text').forEach(el=>el.textContent=project.settings.unit);
  for(const key of ['unit','priority']) $(key).value=project.settings[key];
@@ -65,16 +65,46 @@ function renderResult(){
  const missing=new Map();r?.unplaced.forEach(p=>{const entry=missing.get(p.id)||{...p,count:0};entry.count++;missing.set(p.id,entry);});
  $('unplaced').innerHTML=missing.size?`<section class="unplaced-card"><h3>${r.unplaced.length} ${r.unplaced.length===1?'piece could':'pieces could'} not be placed</h3><ul>${[...missing.values()].map(p=>`<li>${esc(p.label)} · ${display(p.length)} × ${display(p.width)} · quantity ${p.count}<br>${esc(diagnoseFit(resultProject,p).map(i=>i.message).join(' ') || (resultProject.settings.singleSheet?'The one-sheet limit or remaining space prevents this piece from fitting.':'No remaining space fits this piece with the current kerf and stock quantities. Add stock or review the cut settings.'))}</li>`).join('')}</ul></section>`:'';
 }
-function setBusy(busy){$('optimize-label').textContent=busy?'Cancel optimization':'Optimize layout';$('optimize').setAttribute('aria-busy',String(busy));}
+function setBusy(busy){
+ $('optimize-label').textContent=busy?'Cancel optimization':'Optimize layout';
+ $('optimize').setAttribute('aria-busy',String(busy));
+ $('search-progress').classList.toggle('is-searching',busy);
+ if(!busy)$('search-progress').hidden=true;
+}
+function renderProgress(progress){
+ const {completed,total,phase,best}=progress;
+ $('search-progress').hidden=false;
+ $('search-title').textContent=phase;
+ $('search-count').textContent=`${completed} / ${total} strategies`;
+ $('search-bar').max=total;$('search-bar').value=completed;
+ $('search-percent').textContent=`${Math.floor(completed/total*100)}%`;
+ $('search-best').textContent=best?`${best.sheets} ${best.sheets===1?'sheet':'sheets'} · ${best.utilization.toFixed(1)}% used · ${best.cutCount} cuts · ${best.unplaced} unplaced`:'Comparing part orders, rotations, and cut directions.';
+}
 function calculate(trigger){
  if(document.activeElement instanceof HTMLInputElement) document.activeElement.blur();
  if(worker){worker.terminate();worker=null;setBusy(false);toast('Optimization canceled.');return;}
  const errors=validate(project);if(errors.length){feedback(errors.join(' '),true);return;}
- setBusy(true);feedback('');const version=revision;const snapshot=structuredClone(project);worker=new Worker('./worker.mjs',{type:'module'});
- worker.onmessage=({data})=>{worker?.terminate();worker=null;setBusy(false);if(version!==revision)return;if(data.error){feedback(data.error,true);return;}result=data.result;resultProject=snapshot;sheetIndex=0;selected=null;dirty=false;renderResult();persist();if(trigger)toast(result.unplaced.length?`${result.unplaced.length} pieces could not be placed. See the settings warnings.`:`Placed all ${result.sheets.reduce((n,s)=>n+s.parts.length,0)} pieces on ${result.sheets.length} stock ${result.sheets.length===1?'piece':'pieces'}.`);if(trigger&&matchMedia("(max-width:820px)").matches) document.querySelector(".results-column").scrollIntoView({behavior:matchMedia("(prefers-reduced-motion:reduce)").matches?"instant":"smooth",block:"start"});};
- worker.onerror=()=>{worker?.terminate();worker=null;setBusy(false);feedback('The optimizer could not start. Reload the page and try again.',true);};worker.postMessage(snapshot);
+ setBusy(true);feedback('');startedAt=performance.now();
+ renderProgress({completed:0,total:512,phase:'Preparing your pieces',best:null});
+ const version=revision;const snapshot=structuredClone(project);
+ let activeWorker;
+ const fail=()=>{if(activeWorker&&worker!==activeWorker)return;activeWorker?.terminate();worker=null;setBusy(false);feedback('The optimizer could not run. Reload the page and try again.',true);};
+ try{activeWorker=new Worker('./worker.mjs',{type:'module'});worker=activeWorker;}catch{fail();return;}
+ activeWorker.onmessage=({data})=>{
+  if(worker!==activeWorker||version!==revision)return;
+  if(data.progress){renderProgress(data.progress);return;}
+  activeWorker.terminate();worker=null;setBusy(false);
+  if(data.error){feedback(data.error,true);return;}
+  result=data.result;resultProject=snapshot;sheetIndex=0;selected=null;dirty=false;renderResult();persist();
+  $('search-progress').hidden=false;
+  $('search-title').textContent='Best layout ready';
+  $('search-count').textContent=`512 strategies compared in ${((performance.now()-startedAt)/1000).toFixed(1)}s`;
+  if(trigger)toast(result.unplaced.length?`${result.unplaced.length} pieces could not be placed. See the settings warnings.`:`Placed all ${result.sheets.reduce((n,s)=>n+s.parts.length,0)} pieces on ${result.sheets.length} stock ${result.sheets.length===1?'piece':'pieces'}.`);
+ };
+ activeWorker.onerror=fail;activeWorker.onmessageerror=fail;
+ try{activeWorker.postMessage(snapshot);}catch{fail();}
 }
-function replaceProject(next){if(worker){worker.terminate();worker=null;setBusy(false);}project=next;revision++;result=null;resultProject=null;dirty=false;sheetIndex=0;selected=null;renderInputs();renderResult();feedback('');persist();}
+function replaceProject(next){$('clear-notice').hidden=true;$('search-progress').hidden=true;if(worker){worker.terminate();worker=null;setBusy(false);}project=next;revision++;result=null;resultProject=null;dirty=false;sheetIndex=0;selected=null;renderInputs();renderResult();feedback('');persist();}
 function archiveCurrent(){if(!validate(project).length){const found=library.findIndex(p=>p.id===project.id);const saved={...structuredClone(project),updated:new Date().toISOString()};if(found<0)library.unshift(saved);else library[found]=saved;}}
 function download(text,name,type){const url=URL.createObjectURL(new Blob([text],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 const fileName=()=>project.name.replace(/[^\w-]+/g,'-').replace(/^-|-$/g,'').slice(0,60)||'cutlist-project';
@@ -93,20 +123,20 @@ async function importCSV(file){
  if(!file)return;if(file.size>1000000){toast('Choose a CSV smaller than 1 MB.');return;}
  try{const rows=parseCSV((await file.text()).replace(/^\uFEFF/,''));const head=rows.shift()?.map(s=>s.trim().toLowerCase());if(!head||!['length','width','qty'].every(k=>head.includes(k)))throw new Error('CSV needs length, width, and qty headers. Optional: label, material, grain, edges, unit.');
  const parts=rows.map((r,i)=>{const get=k=>r[head.indexOf(k)]?.trim()||'';const unit=get('unit')||project.settings.unit;if(!['mm','in'].includes(unit))throw new Error(`Row ${i+2}: unit must be mm or in.`);return {id:uid(),label:get('label')||`Part ${i+1}`,length:parseDimension(get('length'),unit),width:parseDimension(get('width'),unit),qty:Number(get('qty')),material:get('material')||project.stock[0]?.material||'',grain:['true','1','yes'].includes(get('grain').toLowerCase()),edges:get('edges').toUpperCase()};});
- const candidate={...project,parts:[...project.parts,...parts]};const errors=validate(candidate);if(errors.length)throw new Error(errors[0]);project=candidate;changed();renderInputs();toast(`Added ${parts.length} part rows from CSV.`);
+ const candidate={...project,parts:[...project.parts,...parts]};const errors=validate(candidate,{draft:true});if(errors.length)throw new Error(errors[0]);project=candidate;changed();renderInputs();toast(`Added ${parts.length} part rows from CSV.`);
  }catch(error){feedback(error.message,true);}finally{$('csv-file').value='';}
 }
-function showProjects(){archiveCurrent();persist();$('project-list').innerHTML=library.length?library.map(p=>`<div class="project-entry"><button class="project-open" data-project="${esc(p.id)}">${esc(p.name)}<small>${p.parts.reduce((s,r)=>s+r.qty,0)} pieces · ${new Date(p.updated||Date.now()).toLocaleDateString()}</small></button><button class="icon-button" data-remove-project="${esc(p.id)}" aria-label="Remove saved ${esc(p.name)}">×</button></div>`).join(''):'<p class="helper">Save a project to keep it here.</p>';$('projects-dialog').showModal();}
+function showProjects(){archiveCurrent();persist();$('project-list').innerHTML=library.length?library.map(p=>`<div class="project-entry"><button class="project-open" data-project="${esc(p.id)}">${esc(p.name||'Untitled project')}<small>${p.parts.reduce((s,r)=>s+r.qty,0)} pieces · ${new Date(p.updated||Date.now()).toLocaleDateString()}</small></button><button class="icon-button" data-remove-project="${esc(p.id)}" aria-label="Remove saved ${esc(p.name)}">×</button></div>`).join(''):'<p class="helper">Save a project to keep it here.</p>';$('projects-dialog').showModal();}
 // Delegate row edits so all dynamically added inputs have the same validation path.
 document.querySelector('.inputs-column').addEventListener('change',event=>{
  const target=event.target,field=target.dataset.field;if(!field)return;const parent=target.closest('[data-type]');const p=project[parent.dataset.type].find(p=>p.id===parent.dataset.id);
- if(['length','width'].includes(field))p[field]=parseDimension(target.value,project.settings.unit);else if(field==='qty')p[field]=Number(target.value);else if(field==='grain')p[field]=target.checked;else p[field]=target.value;
+ if(['length','width'].includes(field))p[field]=target.value.trim()?parseDimension(target.value,project.settings.unit):null;else if(field==='qty')p[field]=Number(target.value);else if(field==='grain')p[field]=target.checked;else p[field]=target.value;
  changed();if(field==='label')renderDetails();$('part-summary').textContent=`${project.parts.reduce((s,p)=>s+(p.qty||0),0)} pieces · ${project.parts.length} unique parts`;
 });
 document.querySelector('.inputs-column').addEventListener('click',event=>{const btn=event.target.closest('[data-delete]');if(!btn)return;const parent=btn.closest('[data-type]');project[parent.dataset.type]=project[parent.dataset.type].filter(p=>p.id!==parent.dataset.id);changed();renderInputs();});
-$('add-part').onclick=()=>{project.parts.push({id:uid(),label:`Part ${project.parts.length+1}`,length:600,width:300,qty:1,material:project.stock[0]?.material||'',grain:false,edges:''});changed();renderInputs();$('parts-body').lastElementChild.querySelector('input').focus();};
-$('add-stock').onclick=()=>{project.stock.push({id:uid(),label:`Sheet ${project.stock.length+1}`,length:2440,width:1220,qty:1,material:project.stock[0]?.material||''});changed();renderInputs();};
-$('project-name').onchange=event=>{project.name=event.target.value.trim()||'Untitled project';persist();};
+$('add-part').onclick=()=>{project.parts.push({id:uid(),label:'',length:null,width:null,qty:1,material:project.stock[0]?.material||'',grain:false,edges:''});changed();renderInputs();$('parts-body').lastElementChild.querySelector('input').focus();};
+$('add-stock').onclick=()=>{project.stock.push({id:uid(),label:'',length:null,width:null,qty:1,material:project.stock[0]?.material||''});changed();renderInputs();$('stock-body').lastElementChild.querySelector('input').focus();};
+$('project-name').onchange=event=>{project.name=event.target.value.trim();persist();};
 $('unit').onchange=event=>{project.settings.unit=event.target.value;renderInputs();renderResult();persist();};
 for(const key of ['kerf','trim'])$(key).onchange=event=>{project.settings[key]=parseDimension(event.target.value,project.settings.unit);changed();};
 for(const key of ['rotation','materials','singleSheet'])$(key).onchange=event=>{project.settings[key]=event.target.checked;changed();};
@@ -121,10 +151,12 @@ document.addEventListener('click',event=>{const btn=event.target.closest('[data-
 $('save-btn').onclick=()=>{if(validate(project).length){toast('Fix invalid inputs before saving a project.');return;}archiveCurrent();if(persist())toast('Project saved in your library.');};
 $('projects-btn').onclick=showProjects;
 $('project-list').onclick=event=>{const open=event.target.closest('[data-project]'),remove=event.target.closest('[data-remove-project]');if(open){const p=library.find(p=>p.id===open.dataset.project);replaceProject(structuredClone(p));$('projects-dialog').close();calculate();}if(remove){library=library.filter(p=>p.id!==remove.dataset.removeProject);persist();remove.closest('.project-entry').remove();toast('Removed from saved projects. Your current draft is still available.');}};
-$('new-project').onclick=()=>{archiveCurrent();const blank=sample();blank.name='Untitled project';blank.parts=[];blank.settings.trim=0;blank.stock=[{id:uid(),label:'Stock 1',material:'',length:2440,width:1220,qty:1}];replaceProject(blank);$('projects-dialog').close();$('project-name').focus();};
-$('sample-btn').onclick=()=>{archiveCurrent();replaceProject(sample());calculate();toast('Sample loaded. Your previous project is in Projects.');};
+$('new-project').onclick=()=>{archiveCurrent();replaceProject(emptyProject(project.settings.unit));$('projects-dialog').close();$('project-name').focus();};
+$('clear-btn').onclick=()=>{clearedProject=structuredClone(project);replaceProject(emptyProject(project.settings.unit));$('clear-notice').hidden=false;$('project-name').focus();};
+$('undo-clear').onclick=()=>{if(!clearedProject)return;const previous=clearedProject;clearedProject=null;replaceProject(previous);toast('Project restored. Optimize when you’re ready.');};
+$('sample-btn').onclick=()=>{archiveCurrent();replaceProject(sampleProject());toast('Sample loaded. Choose Optimize layout to explore it.');};
 $('help-btn').onclick=()=>$('help-dialog').showModal();document.querySelectorAll('[data-close]').forEach(btn=>btn.onclick=()=>btn.closest('dialog').close());
 $('import-btn').onclick=()=>{$('csv-file').click();toast('CSV headers: label, length, width, qty, material, grain, edges, unit.');};$('csv-file').onchange=event=>importCSV(event.target.files[0]);
 $('load-file').onclick=()=>$('project-file').click();$('project-file').onchange=async event=>{const file=event.target.files[0];if(!file)return;try{if(file.size>1000000)throw new Error('Choose a project smaller than 1 MB.');const next=JSON.parse(await file.text());const errors=validate(next);if(errors.length)throw new Error(errors[0]);if(next.version!==1)throw new Error('Unsupported project version.');archiveCurrent();replaceProject({...next,id:uid(),name:String(next.name||'Imported project').slice(0,80)});$('projects-dialog').close();calculate();toast('Project imported.');}catch(error){toast(error.message);}finally{event.target.value='';}};
 document.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();calculate(true);}if(event.key==='Escape')$('export-menu').hidden=true;});
-renderInputs();renderResult();persist();calculate();
+renderInputs();renderResult();persist();

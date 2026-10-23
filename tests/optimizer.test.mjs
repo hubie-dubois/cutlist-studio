@@ -35,3 +35,21 @@ test('patio blocking fits on two 16-foot boards with saw kerf',()=>{
   assert.deepEqual(optimize(p),result,'optimization must be repeatable');
  }
 });
+
+test('deep search reports real monotonic progress and never worsens the original search',()=>{
+ for(const priority of ['material','cuts']){
+  const p=project([part('a',73,38,4),part('b',56,36,4),part('c',71,29,2)],undefined,{priority});
+  const before=structuredClone(p),updates=[];
+  const r=optimize(p,progress=>updates.push(progress));
+  assert.equal(updates[0].completed,0);assert.equal(updates[0].best,null);
+  assert.equal(updates.at(-1).completed,512);
+  const rank=b=>[b.unplaced,priority==='cuts'?b.cutCount:b.sheets,priority==='cuts'?b.sheets:b.cutCount];
+  for(let i=1;i<updates.length;i++){
+   assert.equal(updates[i].completed,updates[i-1].completed+1);
+   assert.equal(updates[i].total,512);
+   if(i>1){const a=rank(updates[i].best),b=rank(updates[i-1].best);const first=a.findIndex((v,j)=>v!==b[j]);assert.ok(first===-1||a[first]<b[first]);}
+  }
+  assert.deepEqual(updates.at(-1).best,{sheets:r.sheets.length,unplaced:r.unplaced.length,utilization:r.utilization,cutCount:r.cutCount});
+  assert.deepEqual(p,before,'search must not mutate inputs');verify(p,r);
+ }
+});
