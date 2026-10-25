@@ -1,35 +1,57 @@
 # Cutlist Studio
 
-A dependency-free, browser-local sheet cutting optimizer. Apple-inspired visual design with editable part and stock tables, 512-strategy guillotine packing, finite stock, saw kerf, edge trim, grain locks, material matching, unit conversion, edge banding annotations, cutting sequences, saved projects, CSV import/export, JSON backups, SVG diagrams, and print-to-PDF.
+A free, dependency-free sheet cutting planner that runs in your browser. The live app is at https://cut-list.hubiedubois.com/.
 
-## Run
+## Open the app
 
-Double-click **Cutlist Studio.html** for the self-contained, offline version. No server or installation is required. `npm run build` regenerates this file after source changes.
+Double-click **Cutlist Studio.html** for the self-contained offline version. No server or installation is required. `npm run build` regenerates it after source changes.
 
-`npm run dev` serves the site at http://localhost:4173. No installation step is needed. The deployable website is in `dist/`.
+For local development, `npm run dev` serves `dist/` at http://localhost:4173. `npm test` runs physical-invariant, import/export, units, project migration, and report tests. No dependency installation is needed.
 
-`npm test` runs the optimizer's physical-invariant and regression tests.
+## Projects and reusable lists
+
+New projects start blank. **Load sample project** is opt-in. **Clear all** resets the current project and cutting settings while keeping units; **Undo clear** restores it until another project is opened or the page reloads. Empty and partially entered drafts are saved automatically. Existing edited projects remain compatible.
+
+Use **Save project**, **Save as**, and the searchable **Projects** library to retain named projects. Saved projects can be renamed or deleted with undo. Export/import project JSON to transfer a project, including unfinished drafts. Storage is local to the browser and device; export files for durable backups.
+
+Each table's **List tools** provides separate named part/stock libraries, CSV import/export, spreadsheet paste, sorting, bulk enable/disable, clear with undo, and labels generated from dimensions. Loading a list replaces that table, with undo. Dimensions in saved lists remain correct even when loaded into a project using different display units. Individual rows can be enabled/disabled; duplicate controls are in the materials/grain details.
+
+CSV headers: `length,width,qty` (quantity defaults to 1). Optional: `label,material,grain,edges,band_top,band_bottom,band_left,band_right,enabled,unit`. `quantity` is an alias for `qty`. Spreadsheet paste accepts headers or columns in the order `length,width,qty,label,material`. Import appends rows and checks all data before applying it. Formula-like CSV text is prefixed with an apostrophe for spreadsheet safety.
+
+## Dimensions, materials and grain
+
+Supported units: millimeters, centimeters, meters, decimal/fractional inches, decimal/fractional feet and inches, and generic units. Fractions display to the nearest 1/64 inch; decimal precision is configurable from 0 to 6. Enter `24 1/2`, `2' 3 1/2"`, or an explicit suffix such as `100 cm`. Bare numbers in feet/inch modes mean inches. Changing units or display precision preserves the underlying millimeter geometry. Input fields retain extra decimal places to avoid changing cut sizes just by focusing a field. Dimension order can be length × width or width × length.
+
+Length is horizontal on the unrotated diagram. Parts and stock each have independent grain directions: none, along length, or along width. Rotation must align those axes when both have grain. A legacy part grain lock means grain along length; legacy stock defaults to grain along length. Material names match case-insensitively. Represent thickness in the material name, for example `Birch 18 mm`.
+
+Each part has four independently named banded edges. Totals use original edge dimensions and enabled quantities. Banding is an annotation: enter final cutting dimensions; band thickness is not automatically deducted. Totals include enabled pieces that could not be placed.
+
+## Cutting and optimization
+
+The worker compares up to 512 deterministic greedy guillotine strategies, including the original 80 strategies. Jobs above 1,000 enabled pieces use 128 strategies; above 2,500 use 80. Progress reports actual completed strategies and the best layout. **Use best so far** accepts a completed candidate; **Cancel optimization** stops the worker. Changes to cutting inputs invalidate the old plan and block stale exports.
+
+Constraints include finite enabled stock, material matching, grain, rotation, saw kerf, edge trim, minimum trim width, and a one-sheet limit. Priorities are less total stock area, fewer cuts, or smaller average sheet area, always after minimizing unplaced pieces. This is a practical heuristic, not an exhaustive solver or a guarantee of mathematical optimality.
+
+- Edge trim removes the specified amount from each of the four sides before packing. Use zero for boards already at their finished width. Trim cuts are excluded from cut totals and the sequence.
+- Minimum trim width rejects a placement when either remaining gap, after subtracting kerf, is a nonzero strip narrower than the specified width. Exact stock-edge fits remain allowed. Zero disables this constraint.
+- Preferred cuts choose the first split of each placement along length (horizontal) or width (vertical); the second orthogonal split still occurs where needed. These are explicit local semantics; the reference service's premium implementation is not accessible.
+- Cut coordinates use the original sheet's top-left corner and mark the start of the blade kerf. Every cut spans its current source section. The sequence shows the source rectangle and resulting sections.
+- Limits: 1,000 rows per table, 5,000 enabled pieces and 5,000 enabled stock sheets, dimensions up to 100,000 mm, and kerf/trim settings up to 1,000 mm. Large, fragmented jobs may take longer; the worker remains cancelable.
+
+## Diagrams, statistics and reports
+
+View options control zoom/pan, 90° view rotation, text size, colors, labels, dimensions, cut numbers and offcuts. Rotation of the view does not change the cutting plan. Identical layouts from the same stock row group with an explicit repeat quantity. Disable grouping to inspect every sheet individually. Straight board layouts retain a readable left-to-right piece list.
+
+Project and sheet statistics show stock usage, used/unused area, cut count/length, offcuts, band totals, and unplaced pieces with fit diagnostics. Unused area includes offcuts, kerf and edge trim.
+
+Export project JSON, either table's CSV, the current SVG, configurable PNG images, PDF reports, or print layouts. PDF/image settings include filename, header, notes, text size, date, and current/all layouts. PDFs also offer A4/US Letter, project-wide summary, and cut sequences. A selected-layout report's summary still describes the whole project. PNGs download separately for multiple layouts; the browser may require allowing multiple downloads. PDF pages contain high-resolution rendered images (text is not selectable), with a 250-page limit. SVG preserves vector geometry. View options carry into diagrams in all exports.
 
 ## Website deployment
 
-The live app is at https://cut-list.hubiedubois.com/.
+GitHub Pages uses the **GitHub Actions** workflow in `.github/workflows/pages.yml` to test and publish `dist/` when `main` changes. Keep the custom domain `cut-list.hubiedubois.com` in Pages settings. Publishing the repository root would display this README. The standalone HTML is a separate offline artifact.
 
-GitHub Pages uses **GitHub Actions** as its publishing source. The workflow in `.github/workflows/pages.yml` runs the tests and publishes only `dist/` whenever `main` changes. It can also be run manually from the Actions tab. The website files are ready to deploy; `npm run build` only regenerates the separate offline HTML download.
+## Reference scope
 
-Keep the custom domain set to `cut-list.hubiedubois.com` in the repository's Pages settings. Publishing the repository root instead would display this README because the app's entry point is `dist/index.html`.
+See [the feature audit](docs/feature-audit.md) for the comparison with CutList Optimizer. This project uses its own interface and solver. It does not implement accounts/cloud synchronization, subscriptions/invoices, Android integration, a multilingual interface, or the reference's proprietary optimization server. It has no analytics or external runtime dependencies.
 
-## Use
-
-Enter finished cutting dimensions and stock quantities, then choose **Optimize layout**. Length is horizontal and follows the stock grain; locking a part's grain prevents rotation. Dimensions support decimal values and fractions such as `24 1/2`. Switching mm/in converts dimensions.
-
-CSV import appends rows. Required headers: `length,width,qty`. Optional: `label,material,grain,edges,unit`. Units are `mm` or `in`; absent units use the current project setting. Edges use `T`, `B`, `L`, `R`; banding is an annotation and does not change cutting dimensions.
-
-Save named projects to the browser library; export JSON for durable backups or transfer. Browser storage is local to the origin and device. No accounts, analytics, or external runtime dependencies.
-
-## Algorithm and limits
-
-The worker compares 512 greedy guillotine strategies (32 sorted strategies plus 480 deterministic shuffled strategies), including all of the original 80 strategies. A live progress bar tracks completed strategies, with the best sheet count, material utilization, cut count, and unplaced pieces. The worker keeps the page responsive; no artificial loading delay is added. It first minimizes unplaced parts, then stock area or cut count according to the selected priority. It is a heuristic; global optimality is not guaranteed. Every split goes through the full current free rectangle, with kerf deducted from the remainder. A final edge can coincide with the stock boundary. Layouts are capped at 500 pieces and 500 sheets to keep browser work bounded; optimization is cancelable.
-
-New projects start with an empty name, parts list, and stock list. New rows have blank names and dimensions. Load sample project is an explicit opt-in and does not run optimization automatically. Clear all resets the current project and cutting settings (keeping units), with Undo clear available until another project is opened or the page is reloaded; saved library projects remain available. Empty and partially entered drafts survive reloads. Existing automatic sample data is retired on upgrade; edited projects and explicitly loaded samples are preserved. New projects use 3 mm saw kerf and zero edge trim. Material and trim conflicts appear beside the Optimize button. Edge trim is removed from all four sides before placement; use zero when crosscutting boards already at their finished width. Trim cuts are excluded from the numbered cut count. Cut coordinates are relative to the original sheet's top-left corner and locate the start of the blade kerf. Unused area includes offcuts, kerf, and trim. Material names match case-insensitively. Thickness is represented by a distinct material name, for example `Birch 18 mm`.
-
-Verify dimensions, kerf, grain, and cutting order against the actual material and machinery before cutting. This site implements its own packing engine and interface; it does not use CutList Optimizer's proprietary algorithm or service.
+Verify dimensions, kerf, grain and cutting order against your actual material and machinery before cutting.

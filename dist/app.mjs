@@ -1,162 +1,192 @@
-import {emptyProject, sampleProject, restoreProject} from './project.mjs';
-import {parseCSV} from './csv.mjs';
-import {validate, parseDimension, diagnoseFit} from './optimizer.mjs';
+import {emptyProject, sampleProject, restoreProject} from './project.mjs?v=20261024';
+import {validate, parseDimension, diagnoseFit, searchStrategyCount} from './optimizer.mjs?v=20261024';
+import {formatMeasurement, formatArea, unitInfo} from './units.mjs?v=20261024';
+import {prepareProject, blankRow, activeRows, dimensionsText, edgeBands, bandTotals, groupSheets, sheetStats, stockUsage, exportRowsCSV, importRowsText} from './workspace.mjs?v=20261024';
+import {sheetSVG, escapeHTML, pieceColors} from './diagram.mjs?v=20261024';
+import {downloadBlob, exportSheetPNG, exportReportPDF} from './export.mjs?v=20261024';
 const $ = id => document.getElementById(id);
 const icons = {folder:'M3 7h6l2-3h6a2 2 0 0 1 2 2v12H3z',save:'M5 3h12l3 3v15H4V3z M8 3v6h8V3 M8 21v-8h8v8',edit:'m4 16 11-11 4 4-11 11H4z M13 7l4 4',parts:'M3 3h18v18H3z M3 13h18 M13 3v10 M9 13v8',layers:'m12 3 10 5-10 5L2 8z M2 12l10 5 10-5 M2 16l10 5 10-5',upload:'M12 16V3 m-4 4 4-4 4 4 M4 15v5h16v-5',download:'M12 3v13 m-4-4 4 4 4-4 M4 16v5h16v-5',plus:'M12 5v14 M5 12h14',sliders:'M4 6h7 m5 0h4 M4 12h3 m5 0h8 M4 18h10 m5 0h1 M11 3v6 M7 9v6 M14 15v6',help:'M9 8a3 3 0 1 1 5 2c-2 1-2 2-2 3 M12 17v.1 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',sparkles:'m12 2 2.5 7.5L22 12l-7.5 2.5L12 22l-2.5-7.5L2 12l7.5-2.5z M20 2v4 M18 4h4',shield:'m12 2 9 4v6c0 5-9 10-9 10S3 17 3 12V6z m-4 10 3 3 5-6',chevron:'m7 10 5 5 5-5',bulb:'M8 17c0-4-3-4-3-8a7 7 0 0 1 14 0c0 4-3 4-3 8 M8 18h8 M9 22h6',chart:'M4 20V10 M10 20V4 M16 20v-8 M22 20V6',check:'m4 12 5 5L20 6',scissors:'m9 9 11 11 M9 15 20 4 M10 6a4 4 0 1 1-8 0 4 4 0 0 1 8 0 M10 18a4 4 0 1 1-8 0 4 4 0 0 1 8 0'};
 function icon(name) {return `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${icons[name] || icons.parts}"/></svg>`;}
 document.querySelectorAll('[data-icon]').forEach(el => el.innerHTML=icon(el.dataset.icon));
-const palette=[['#d8e6f7','#6787b4'],['#e4def3','#9180b6'],['#f4e3cd','#b79b72'],['#dcebe1','#789c87'],['#f3dde2','#b0808c'],['#dcebed','#7da0a7'],['#e9e6d7','#a39a75'],['#e1e1ed','#9090b4']];
-const uid=()=>crypto.randomUUID();
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const STORAGE='cutlist-studio-v1';
-let library=[],project=emptyProject(),result=null,resultProject=null,sheetIndex=0,view='layout',selected=null,worker=null,revision=0,dirty=false,toastTimer,clearedProject=null,startedAt=0;
-try{const saved=JSON.parse(localStorage.getItem(STORAGE)||'null');if(saved){library=Array.isArray(saved.library)?saved.library.filter(p=>!validate(p).length):[];project=restoreProject(saved);}}catch{ /* A blocked or invalid store must not prevent editing. */ }
-function display(n){if(n===null||!Number.isFinite(n))return '';return Number((n/(project.settings.unit==='in'?25.4:1)).toFixed(project.settings.unit==='in'?4:3)).toString();}
-const dimension=n=>`${display(n)} ${project.settings.unit}`;
-function toast(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4000);}
-function persist(){try{localStorage.setItem(STORAGE,JSON.stringify({current:project,library,blankStart:true}));$('saved-status').innerHTML='<span class="status-dot"></span> Saved on this device';return true;}catch{$('saved-status').textContent='Browser storage unavailable · export a backup';return false;}}
-function changed(){revision++;dirty=true;$('search-progress').hidden=true;if(worker){worker.terminate();worker=null;setBusy(false);}persist();renderDiagnostics();if(result)feedback('Your inputs changed. Optimize again to update this plan.');}
+const uid=()=>crypto.randomUUID(), esc=escapeHTML, STORAGE='cutlist-studio-v1';
+let library=[],lists=[],project=prepareProject(emptyProject()),result=null,resultProject=null,groups=[],sheetIndex=0,view='layout',selected=null,worker=null,revision=0,dirty=false,toastTimer,clearedProject=null,undoProject=null,deletedLibrary=null,deletedList=null,listType='parts',nameAction=null,exportKind='pdf',exporting=false;
+let latestBest=null,searchSnapshot=null,startedAt=0,completedStrategies=0;
+const diagramView={labels:true,dimensions:true,colors:true,cuts:false,offcuts:true,fontScale:1,rotation:0};
+let zoom=100,pan=null;
+const validDraft=p=>p&&typeof p.id==='string'&&typeof p.name==='string'&&!validate(p,{draft:true}).length;
+try{
+ const saved=JSON.parse(localStorage.getItem(STORAGE)||'null');
+ if(saved){library=Array.isArray(saved.library)?saved.library.filter(validDraft).map(prepareProject):[];project=prepareProject(restoreProject(saved));lists=Array.isArray(saved.lists)?saved.lists.filter(l=>l&&typeof l.id==='string'&&typeof l.name==='string'&&['parts','stock'].includes(l.type)&&!validate({...emptyProject(),[l.type]:l.rows},{draft:true}).length):[];}
+}catch{/* A blocked store must not prevent editing. */}
+const display=n=>formatMeasurement(n,project.settings.unit,project.settings.precision);
+const inputValue=n=>formatMeasurement(n,project.settings.unit,project.settings.precision,{input:true});
+const dimension=n=>`${display(n)} ${unitInfo(project.settings.unit).label}`;
+const dims=(l,w)=>dimensionsText(l,w,project.settings);
+const area=n=>formatArea(n,project.settings.unit,project.settings.precision);
+const drawingProject=()=>({...resultProject,settings:{...resultProject.settings,unit:project.settings.unit,precision:project.settings.precision,dimensionOrder:project.settings.dimensionOrder}});
+function toast(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4500);}
+function persist(){try{localStorage.setItem(STORAGE,JSON.stringify({current:project,library,lists,blankStart:true}));$('saved-status').innerHTML='<span class="status-dot"></span> Saved on this device';return true;}catch{$('saved-status').textContent='Storage full or unavailable · export a backup';return false;}}
+function stopWorker(){worker?.terminate();worker=null;$('optimize-label').textContent='Optimize layout';$('optimize').setAttribute('aria-busy','false');$('search-progress').classList.remove('is-searching');$('accept-best').disabled=true;}
+function changed(){revision++;dirty=true;stopWorker();latestBest=null;$('search-progress').hidden=true;persist();renderDiagnostics();if(result)feedback('Your inputs changed. Optimize again to update this plan.');}
 function feedback(message,error=false){$('feedback').hidden=!message;$('feedback').className='feedback'+(error?' error':'');$('feedback').textContent=message;}
-function renderDiagnostics() {
+function rememberEdit(message){undoProject=structuredClone(project);$('edit-message').textContent=message;$('edit-notice').hidden=false;}
+function renderDiagnostics(){
  const errors=project.parts.length||project.stock.length?validate(project):[];
- const issues=errors.length ? errors : [...new Set(project.parts.flatMap(p=>diagnoseFit(project,p).map(i=>i.message)))];
- $('input-feedback').hidden=!issues.length;
- $('input-feedback').innerHTML=issues.length?`<strong>Check these settings</strong><ul>${issues.map(message=>`<li>${esc(message)}</li>`).join('')}</ul>`:'';
+ const issues=errors.length?errors:[...new Set(activeRows(project.parts).flatMap(p=>diagnoseFit(project,p).map(i=>i.message)))];
+ $('input-feedback').hidden=!issues.length;$('input-feedback').innerHTML=issues.length?`<strong>Check these settings</strong><ul>${issues.slice(0,8).map(m=>`<li>${esc(m)}</li>`).join('')}${issues.length>8?`<li>…and ${issues.length-8} more. Review your rows.</li>`:''}</ul>`:'';
 }
-function row(p,i,type){return `<tr data-id="${esc(p.id)}" data-type="${type}"><td><div class="row-name">${type==='parts'?`<span class="color-dot" style="background:${palette[i%palette.length][1]}"></span>`:''}<input class="name-input" data-field="label" aria-label="${type==='parts'?'Part':'Stock'} ${i+1} name" maxlength="100" placeholder="${type==='parts'?'Part name':'Stock name'}" value="${esc(p.label)}"></div></td><td><input data-field="length" inputmode="decimal" aria-label="${type==='parts'?'Part':'Stock'} ${i+1} length" placeholder="—" value="${display(p.length)}"></td><td><input data-field="width" inputmode="decimal" aria-label="${type==='parts'?'Part':'Stock'} ${i+1} width" placeholder="—" value="${display(p.width)}"></td><td><input data-field="qty" type="number" min="1" max="500" step="1" aria-label="${type==='parts'?'Part':'Stock'} ${i+1} quantity" value="${p.qty}"></td><td><button class="delete-row" data-delete aria-label="Remove ${esc(p.label||(type==='parts'?'part ':'stock ')+(i+1))}">×</button></td></tr>`;}
+function row(p,i,type){
+ const label=type==='parts'?'Part':'Stock', fields=project.settings.dimensionOrder==='wl'?['width','length']:['length','width'];
+ return `<tr data-id="${esc(p.id)}" data-type="${type}" class="${p.enabled===false?'disabled-row':''}"><td><div class="row-name"><input type="checkbox" data-field="enabled" aria-label="Enable ${label.toLowerCase()} ${i+1}" ${p.enabled!==false?'checked':''}><input class="name-input" data-field="label" aria-label="${label} ${i+1} name" maxlength="100" placeholder="${label} name" value="${esc(p.label)}"></div></td>${fields.map(f=>`<td><input data-field="${f}" aria-label="${label} ${i+1} ${f}" placeholder="—" value="${esc(typeof p[f]==='string'?p[f]:inputValue(p[f]))}"></td>`).join('')}<td><input data-field="qty" type="number" min="1" max="5000" step="1" aria-label="${label} ${i+1} quantity" value="${esc(p.qty)}"></td><td><button class="delete-row" data-delete aria-label="Remove ${label.toLowerCase()} ${i+1}">×</button></td></tr>`;
+}
 function renderDetails(){
- $('part-details').innerHTML=project.parts.map((p,i)=>`<div class="detail-row" data-type="parts" data-id="${esc(p.id)}"><span title="${esc(p.label)}">${esc(p.label||'Part '+(i+1))}</span><input type="text" data-field="material" maxlength="100" aria-label="${esc(p.label)} material" value="${esc(p.material)}"><label><input type="checkbox" data-field="grain" ${p.grain?'checked':''}> Lock grain</label><label>Band <select data-field="edges" aria-label="${esc(p.label)} edge banding"><option value="" ${!p.edges?'selected':''}>None</option><option value="T" ${p.edges==='T'?'selected':''}>Top</option><option value="TB" ${p.edges==='TB'?'selected':''}>Top + bottom</option><option value="LR" ${p.edges==='LR'?'selected':''}>Left + right</option><option value="TBLR" ${p.edges==='TBLR'?'selected':''}>All edges</option>${p.edges&&!['T','TB','LR','TBLR'].includes(p.edges)?`<option selected value="${esc(p.edges)}">${esc(p.edges)}</option>`:''}</select></label></div>`).join('');
- $('stock-details').innerHTML=project.stock.map(p=>`<div class="detail-row" data-type="stock" data-id="${esc(p.id)}"><span>${esc(p.label)}</span><input type="text" data-field="material" maxlength="100" aria-label="${esc(p.label)} stock material" value="${esc(p.material)}"></div>`).join('');
+ for(const type of ['parts','stock'])$(type==='parts'?'part-details':'stock-details').innerHTML=project[type].map((p,i)=>{
+ const name=p.label||`${type==='parts'?'Part':'Stock'} ${i+1}`,grain=p.grain===true?'length':p.grain===false?'none':p.grain||(type==='stock'?'length':'none'),bands=edgeBands(p);
+ return `<div class="detail-row" data-type="${type}" data-id="${esc(p.id)}"><strong>${esc(name)}</strong><label>Material<input type="text" data-field="material" maxlength="100" aria-label="${esc(name)} material" value="${esc(p.material)}" list="materials-list"></label><label>Grain<select data-field="grain" aria-label="${esc(name)} grain">${['none','length','width'].map(g=>`<option value="${g}" ${grain===g?'selected':''}>${g==='none'?'None':g==='length'?'Along length':'Along width'}</option>`).join('')}</select></label><button class="text-button" data-duplicate>Duplicate row</button>${type==='parts'?`<div class="band-fields">${[['T','Top'],['B','Bottom'],['L','Left'],['R','Right']].map(([side,label])=>`<label>${label} band<input type="text" data-band="${side}" maxlength="100" aria-label="${esc(name)} ${label.toLowerCase()} band" value="${esc(bands[side]||'')}" placeholder="None" list="bands-list"></label>`).join('')}</div>`:''}</div>`;
+ }).join('');
+ const materials=[...new Set([...project.parts,...project.stock].map(p=>p.material).filter(Boolean))],bands=[...new Set(project.parts.flatMap(p=>Object.values(edgeBands(p))).filter(Boolean))];
+ $('materials-list').innerHTML=materials.map(v=>`<option value="${esc(v)}"></option>`).join('');$('bands-list').innerHTML=bands.map(v=>`<option value="${esc(v)}"></option>`).join('');
 }
 function renderInputs(){
  $('project-name').value=project.name;
- $('parts-body').innerHTML=project.parts.map((p,i)=>row(p,i,'parts')).join('')||'<tr><td colspan="5" class="empty-table">No parts yet. Add your first piece below.</td></tr>';
- $('stock-body').innerHTML=project.stock.map((p,i)=>row(p,i,'stock')).join('')||'<tr><td colspan="5" class="empty-table">Add the stock you have on hand.</td></tr>';
- $('part-summary').textContent=`${project.parts.reduce((s,p)=>s+(p.qty||0),0)} pieces · ${project.parts.length} unique parts`;
- document.querySelectorAll('.unit-text').forEach(el=>el.textContent=project.settings.unit);
- for(const key of ['unit','priority']) $(key).value=project.settings[key];
- for(const key of ['kerf','trim']) $(key).value=display(project.settings[key]);
- for(const key of ['rotation','materials','singleSheet']) $(key).checked=!!project.settings[key];
- renderDetails();
- renderDiagnostics();
-}
-function svgSheet(sheet, labels=true, interactive=true, prefix='plan') {
- const pad=Math.max(sheet.length,sheet.width)*.065, font=sheet.length*.013, t=resultProject?.settings.trim||0;
- const defs=`<defs><pattern id="${prefix}-hatch" width="14" height="14" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="14" height="14" fill="#f6f7f9"/><path d="M0 0v14" stroke="#e0e4ea" stroke-width="3"/></pattern></defs>`;
- const pieces=sheet.parts.map((p,i)=>{const [fill,stroke]=palette[p.color%palette.length], fs=Math.min(font,Math.min(p.w,p.h)*.15);const edges=p.rotated?String(p.edges||'').replace(/[TBLR]/g,c=>({T:'R',R:'B',B:'L',L:'T'}[c])):p.edges||'';return `<g class="piece ${selected===p.id?'selected':''}" ${interactive?`data-piece="${esc(p.id)}" role="button" tabindex="0" aria-label="${esc(p.label)}, ${display(p.length)} by ${display(p.width)}, ${p.rotated?'rotated':'not rotated'}"`:''}><title>${esc(p.label)} · ${display(p.length)} × ${display(p.width)} ${project.settings.unit}${p.grain?' · Grain locked':''}${p.edges?' · Banding: '+esc(p.edges):''}</title><rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" fill="${fill}" stroke="${stroke}" stroke-opacity=".55" stroke-width="1.5"/>${edges.includes('T')?`<path d="M${p.x} ${p.y}h${p.w}" stroke="${stroke}" stroke-width="9"/>`:''}${edges.includes('B')?`<path d="M${p.x} ${p.y+p.h}h${p.w}" stroke="${stroke}" stroke-width="9"/>`:''}${edges.includes('L')?`<path d="M${p.x} ${p.y}v${p.h}" stroke="${stroke}" stroke-width="9"/>`:''}${edges.includes('R')?`<path d="M${p.x+p.w} ${p.y}v${p.h}" stroke="${stroke}" stroke-width="9"/>`:''}${labels?`<text x="${p.x+p.w/2}" y="${p.y+p.h/2-fs*.25}" fill="#4e5665" text-anchor="middle" font-size="${fs}" font-weight="550">${esc(p.label.length>22?p.label.slice(0,20)+'…':p.label)}</text><text x="${p.x+p.w/2}" y="${p.y+p.h/2+fs*1.25}" fill="#5c6472" text-anchor="middle" font-size="${fs*.8}">${display(p.w)} × ${display(p.h)}${p.rotated?' ↻':''}</text>`:''}${p.grain?`<text x="${p.x+p.w/2}" y="${p.y+p.h*.23}" font-size="${fs}" text-anchor="middle" fill="${stroke}">↔</text>`:''}</g>`;}).join('');
- return `<svg xmlns="http://www.w3.org/2000/svg" class="sheet-svg" viewBox="${-pad} ${-pad} ${sheet.length+2*pad} ${sheet.width+2*pad}" role="img" aria-label="Cutting layout for ${esc(sheet.label)}">${defs}<style>text{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}</style><rect width="${sheet.length}" height="${sheet.width}" fill="url(#${prefix}-hatch)" stroke="#bdc5d1" stroke-width="3"/>${t?`<rect x="${t}" y="${t}" width="${sheet.length-2*t}" height="${sheet.width-2*t}" fill="none" stroke="#bfc7d2" stroke-width="2" stroke-dasharray="8 8"/>`:''}${pieces}<g fill="none" stroke="#bbc4d0" stroke-width="2"><path d="M0 ${-pad*.45}H${sheet.length} M0 ${-pad*.6}v${pad*.3} M${sheet.length} ${-pad*.6}v${pad*.3}"/><path d="M${-pad*.45} 0V${sheet.width} M${-pad*.6} 0h${pad*.3} M${-pad*.6} ${sheet.width}h${pad*.3}"/></g><text x="${sheet.length/2}" y="${-pad*.57}" fill="#8b96a6" text-anchor="middle" font-size="${font*.85}">${display(sheet.length)} ${project.settings.unit}</text><text transform="translate(${-pad*.6} ${sheet.width/2}) rotate(-90)" fill="#8b96a6" text-anchor="middle" font-size="${font*.85}">${display(sheet.width)} ${project.settings.unit}</text></svg>`;
+ for(const type of ['parts','stock'])$(type+'-body').innerHTML=project[type].map((p,i)=>row(p,i,type)).join('')||`<tr><td colspan="5" class="empty-table">${type==='parts'?'No parts yet. Add your first piece below.':'Add the stock you have on hand.'}</td></tr>`;
+ $('part-summary').textContent=`${activeRows(project.parts).reduce((n,p)=>n+(p.qty||0),0)} enabled pieces · ${project.parts.length} rows`;
+ document.querySelectorAll('.unit-text').forEach(el=>el.textContent=unitInfo(project.settings.unit).label);
+ document.querySelectorAll('.first-dimension').forEach(el=>el.textContent=project.settings.dimensionOrder==='wl'?'WIDTH':'LENGTH');document.querySelectorAll('.second-dimension').forEach(el=>el.textContent=project.settings.dimensionOrder==='wl'?'LENGTH':'WIDTH');
+ for(const key of ['unit','priority','cutDirection','precision','dimensionOrder'])$(key).value=project.settings[key];
+ for(const key of ['kerf','trim','minTrim'])$(key).value=inputValue(project.settings[key]);
+ for(const key of ['rotation','materials','singleSheet','groupLayouts'])$(key).checked=!!project.settings[key];
+ renderDetails();renderDiagnostics();
 }
 function renderResult(){
- const r=result;
- $('metrics').innerHTML=`<div class="metric"><div class="metric-label">${icon('layers')} Sheets used</div><div class="metric-number">${r?r.sheets.length:'—'}<small>${r?'of '+(resultProject||project).stock.reduce((s,p)=>s+p.qty,0)+' available':''}</small></div></div><div class="metric green"><div class="metric-label">${icon('chart')} Material used</div><div class="metric-number">${r?r.utilization.toFixed(1)+'%':'—'}</div></div><div class="metric"><div class="metric-label">${icon('scissors')} Total cuts</div><div class="metric-number">${r?r.cutCount:'—'}<small>excl. trim</small></div></div>`;
- $('sheet-tabs').innerHTML=r?r.sheets.map((s,i)=>`<button class="sheet-tab ${i===sheetIndex?'active':''}" data-sheet="${i}" aria-pressed="${i===sheetIndex}">Sheet ${String(i+1).padStart(2,'0')} <span>${s.parts.length} pieces</span></button>`).join(''):'';
- $('layout-tab').classList.toggle('active',view==='layout');$('cuts-tab').classList.toggle('active',view==='cuts');$('layout-tab').setAttribute('aria-pressed',view==='layout');$('cuts-tab').setAttribute('aria-pressed',view==='cuts');
+ const r=result;groups=r?groupSheets(r.sheets,project.settings.groupLayouts):[];sheetIndex=Math.min(sheetIndex,Math.max(0,groups.length-1));
+ $('metrics').innerHTML=`<div class="metric"><div class="metric-label">${icon('layers')} Sheets used</div><div class="metric-number">${r?r.sheets.length:'—'}<small>${r?'of '+activeRows(resultProject.stock).reduce((n,p)=>n+p.qty,0)+' available':''}</small></div></div><div class="metric green"><div class="metric-label">${icon('chart')} Material used</div><div class="metric-number">${r?r.utilization.toFixed(1)+'%':'—'}</div></div><div class="metric"><div class="metric-label">${icon('scissors')} Total cuts</div><div class="metric-number">${r?r.cutCount:'—'}<small>excl. trim</small></div></div>`;
+ $('sheet-tabs').innerHTML=groups.map((g,i)=>`<button class="sheet-tab ${i===sheetIndex?'active':''}" data-sheet="${i}" aria-pressed="${i===sheetIndex}">Sheet ${g.index+1}${g.count>1?` × ${g.count}`:''}<span>${g.sheet.parts.length} pieces</span></button>`).join('');
+ for(const [id,value] of [['layout-tab','layout'],['cuts-tab','cuts']]){$(id).classList.toggle('active',view===value);$(id).setAttribute('aria-pressed',view===value);}
  $('kerf-value').textContent=dimension(resultProject?.settings.kerf??project.settings.kerf);
- const sheet=r?.sheets[sheetIndex];
- if(!sheet){$('plan-content').innerHTML=`<div class="empty-state">${icon('parts')}<br><strong>${r?'No pieces fit the available stock.':'Your next project, beautifully planned.'}</strong><br>${r?'Check sheet sizes, materials, and grain settings.':'Add your parts and stock, then optimize your layout.'}</div>`;}
+ const group=groups[sheetIndex],sheet=group?.sheet;
+ if(!sheet)$('plan-content').innerHTML=`<div class="empty-state">${icon('parts')}<br><strong>${r?'No pieces fit the available stock.':'Your next project, beautifully planned.'}</strong><br>${r?'Check sizes, materials, grain, and trim settings.':'Add your parts and stock, then optimize your layout.'}</div>`;
  else if(view==='layout'){
-  const area=sheet.parts.reduce((s,p)=>s+p.w*p.h,0);
-  $('plan-content').innerHTML=`<div class="sheet-meta"><strong>${esc(sheet.label)}${sheet.material&&sheet.material!==sheet.label?` <span>· ${esc(sheet.material)}</span>`:''}</strong><span>${(area/(sheet.length*sheet.width)*100).toFixed(1)}% used</span></div><div class="drawing">${svgSheet(sheet,$('labels').checked)}</div>${sheet.parts.every(p=>Math.abs(p.h-sheet.width)<1e-7&&Math.abs(p.y)<1e-7)?`<div class="board-pieces"><p>Pieces from left to right</p><ol>${[...sheet.parts].sort((a,b)=>a.x-b.x).map(p=>`<li><strong>${esc(p.label)}</strong><span>${dimension(p.w)}</span></li>`).join('')}</ol></div>`:''}`;
- }else{$('plan-content').innerHTML=`<div class="cut-note">Cut in this order after trimming ${dimension(resultProject.settings.trim)} from each edge. X / Y are measured from the original sheet’s top-left corner, at the start of the blade kerf.</div><div class="cuts-wrap"><table class="cut-table"><thead><tr><th>#</th><th>Direction</th><th>Start X / Y</th><th>Cut length</th></tr></thead><tbody>${sheet.cuts.map((c,i)=>`<tr><td>${i+1}</td><td>${c.axis==='vertical'?'↓ Vertical':'→ Horizontal'}</td><td>${display(c.x)} / ${display(c.y)}</td><td>${dimension(c.length)}</td></tr>`).join('')}</tbody></table></div>`;}
- const total=(resultProject||project).parts.reduce((s,p)=>s+p.qty,0),fitted=r?r.sheets.reduce((s,sh)=>s+sh.parts.length,0):0;
+  const stats=sheetStats(sheet);
+  $('plan-content').innerHTML=`<div class="sheet-meta"><strong>${esc(sheet.label||'Stock')} · ${esc(sheet.material)}${group.count>1?` · Repeat ${group.count} times`:''}</strong><span>${stats.utilization.toFixed(1)}% used</span></div><div class="drawing-viewport" tabindex="0" aria-label="Cutting diagram; scroll or drag to pan"><div class="drawing" style="width:${zoom}%">${sheetSVG(sheet,drawingProject(),{...diagramView,interactive:true,selected,prefix:'plan'})}</div></div>${sheet.parts.every(p=>Math.abs(p.h-sheet.width)<1e-7&&Math.abs(p.y)<1e-7)?`<div class="board-pieces"><p>Pieces from left to right</p><ol>${[...sheet.parts].sort((a,b)=>a.x-b.x).map(p=>`<li><strong>${esc(p.label||'Part')}</strong><span>${dimension(p.w)}</span></li>`).join('')}</ol></div>`:''}<div class="sheet-stats"><span>${esc(dims(sheet.length,sheet.width))}</span><span>${stats.pieces} pieces</span><span>${stats.cuts} cuts · ${dimension(stats.cutLength)}</span><span>${area(stats.waste)} unused</span></div>`;
+ }else{
+  $('plan-content').innerHTML=`<div class="cut-note">Trim ${dimension(resultProject.settings.trim)} from each edge first. X / Y locate the start of the blade kerf from the original top-left corner.${group.count>1?` Repeat this sequence on ${group.count} sheets.`:''}</div><div class="cuts-wrap"><table class="cut-table"><thead><tr><th>#</th><th>Direction</th><th>X / Y</th><th>Length</th><th>Source section</th><th>Resulting sections</th></tr></thead><tbody>${sheet.cuts.map((c,i)=>`<tr><td>${i+1}</td><td>${c.axis==='vertical'?'↓ Vertical':'→ Horizontal'}</td><td>${display(c.x)} / ${display(c.y)}</td><td>${display(c.length)}</td><td>${c.source?esc(dims(c.source.w,c.source.h)):'—'}</td><td>${c.outputs?.map(p=>esc(dims(p.w,p.h))).join(' + ')||'—'}</td></tr>`).join('')}</tbody></table></div>`;
+ }
+ $('statistics').hidden=!r;
+ if(r){const bands=bandTotals(resultProject.parts);$('statistics').innerHTML=`<details><summary>Project statistics & materials</summary><div class="stats-content"><dl><dt>Used area</dt><dd>${area(r.usedArea)}</dd><dt>Unused area (kerf & trim included)</dt><dd>${area(r.stockArea-r.usedArea)}</dd><dt>Total cut length</dt><dd>${dimension(r.cutLength)}</dd><dt>Reusable offcut rectangles</dt><dd>${r.sheets.reduce((n,s)=>n+s.free.length,0)}</dd></dl><h3>Stock usage</h3><ul>${stockUsage(r).map(s=>`<li>${esc(s.label||'Stock')} · ${esc(dims(s.length,s.width))} · ${s.used} used / ${s.qty} available</li>`).join('')}</ul>${bands.length?`<h3>Banding for all enabled parts</h3><ul>${bands.map(b=>`<li>${esc(b.name)} · ${dimension(b.length)}</li>`).join('')}</ul>`:''}${sheet?.free.length?`<h3>Offcuts on this sheet</h3><ul>${sheet.free.map(f=>`<li>${esc(dims(f.w,f.h))} · X ${display(f.x)} / Y ${display(f.y)}</li>`).join('')}</ul>`:''}</div></details>`;}
+ const total=activeRows((resultProject||project).parts).reduce((n,p)=>n+p.qty,0),fitted=r?r.sheets.reduce((n,s)=>n+s.parts.length,0):0;
  $('complete-badge').textContent=r?(r.unplaced.length?`${r.unplaced.length} unplaced`:'✓ All parts placed'):'Ready when you are';
- $('breakdown-caption').textContent=r?`${fitted} of ${total} pieces placed · ${((r.stockArea-r.usedArea)/(project.settings.unit==='in'?645.16:1e6)).toFixed(2)} ${project.settings.unit==='in'?'in²':'m²'} unused, including kerf & trim`:'A clear view of what goes where.';
- $('piece-legend').innerHTML=(resultProject||project).parts.map((p,i)=>`<div class="legend-item"><span class="color-dot" style="background:${palette[i%palette.length][0]};border:1px solid ${palette[i%palette.length][1]}55"></span><span class="legend-label">${esc(p.label)}</span><small>× ${p.qty}</small></div>`).join('');
- const missing=new Map();r?.unplaced.forEach(p=>{const entry=missing.get(p.id)||{...p,count:0};entry.count++;missing.set(p.id,entry);});
- $('unplaced').innerHTML=missing.size?`<section class="unplaced-card"><h3>${r.unplaced.length} ${r.unplaced.length===1?'piece could':'pieces could'} not be placed</h3><ul>${[...missing.values()].map(p=>`<li>${esc(p.label)} · ${display(p.length)} × ${display(p.width)} · quantity ${p.count}<br>${esc(diagnoseFit(resultProject,p).map(i=>i.message).join(' ') || (resultProject.settings.singleSheet?'The one-sheet limit or remaining space prevents this piece from fitting.':'No remaining space fits this piece with the current kerf and stock quantities. Add stock or review the cut settings.'))}</li>`).join('')}</ul></section>`:'';
-}
-function setBusy(busy){
- $('optimize-label').textContent=busy?'Cancel optimization':'Optimize layout';
- $('optimize').setAttribute('aria-busy',String(busy));
- $('search-progress').classList.toggle('is-searching',busy);
- if(!busy)$('search-progress').hidden=true;
+ $('breakdown-caption').textContent=r?`${fitted} of ${total} pieces placed · ${area(r.stockArea-r.usedArea)} unused`:'A clear view of what goes where.';
+ $('piece-legend').innerHTML=activeRows((resultProject||project).parts).map((p,i)=>`<div class="legend-item"><span class="color-dot" style="background:${pieceColors(i)[0]}"></span><span class="legend-label">${esc(p.label||'Part '+(i+1))}</span><small>× ${p.qty}</small></div>`).join('');
+ const missing=new Map();r?.unplaced.forEach(p=>{const item=missing.get(p.id)||{...p,count:0};item.count++;missing.set(p.id,item);});
+ $('unplaced').innerHTML=missing.size?`<section class="unplaced-card"><h3>${r.unplaced.length} pieces could not be placed</h3><ul>${[...missing.values()].map(p=>`<li>${esc(p.label||'Part')} · ${esc(dims(p.length,p.width))} · quantity ${p.count}<br>${esc(diagnoseFit(drawingProject(),p).map(i=>i.message).join(' ')||(resultProject.settings.singleSheet?'The one-sheet limit prevents this piece from fitting.':'No remaining space fits this piece with the current kerf and stock quantities.'))}</li>`).join('')}</ul></section>`:'';
 }
 function renderProgress(progress){
- const {completed,total,phase,best}=progress;
- $('search-progress').hidden=false;
- $('search-title').textContent=phase;
- $('search-count').textContent=`${completed} / ${total} strategies`;
- $('search-bar').max=total;$('search-bar').value=completed;
- $('search-percent').textContent=`${Math.floor(completed/total*100)}%`;
- $('search-best').textContent=best?`${best.sheets} ${best.sheets===1?'sheet':'sheets'} · ${best.utilization.toFixed(1)}% used · ${best.cutCount} cuts · ${best.unplaced} unplaced`:'Comparing part orders, rotations, and cut directions.';
+ completedStrategies=progress.completed;const {completed,total,phase,best}=progress;
+ $('search-progress').hidden=false;$('search-title').textContent=phase;$('search-count').textContent=`${completed} / ${total} strategies`;$('search-bar').max=total;$('search-bar').value=completed;$('search-percent').textContent=`${Math.floor(completed/total*100)}%`;
+ $('search-best').textContent=best?`${best.sheets} sheets · ${best.utilization.toFixed(1)}% used · ${best.cutCount} cuts · ${best.unplaced} unplaced`:'Comparing part orders, rotations, and cut directions.';
 }
-function calculate(trigger){
- if(document.activeElement instanceof HTMLInputElement) document.activeElement.blur();
- if(worker){worker.terminate();worker=null;setBusy(false);toast('Optimization canceled.');return;}
+function finishSearch(best,early=false){stopWorker();result=best;resultProject=searchSnapshot;dirty=false;sheetIndex=0;selected=null;renderResult();persist();$('search-title').textContent=early?'Best so far accepted':'Best layout ready';$('search-count').textContent=`${completedStrategies} strategies compared in ${((performance.now()-startedAt)/1000).toFixed(1)}s`;toast(best.unplaced.length?`${best.unplaced.length} pieces could not be placed.`:`Placed all ${best.sheets.reduce((n,s)=>n+s.parts.length,0)} pieces.`);}
+function calculate(){
+ document.activeElement?.blur();if(worker){stopWorker();$('search-progress').hidden=true;toast('Optimization canceled.');return;}
  const errors=validate(project);if(errors.length){feedback(errors.join(' '),true);return;}
- setBusy(true);feedback('');startedAt=performance.now();
- renderProgress({completed:0,total:512,phase:'Preparing your pieces',best:null});
- const version=revision;const snapshot=structuredClone(project);
+ feedback('');latestBest=null;searchSnapshot=structuredClone(project);startedAt=performance.now();const version=revision;
+ $('optimize-label').textContent='Cancel optimization';$('optimize').setAttribute('aria-busy','true');$('search-progress').classList.add('is-searching');renderProgress({completed:0,total:searchStrategyCount(project),phase:'Preparing your pieces',best:null});
  let activeWorker;
- const fail=()=>{if(activeWorker&&worker!==activeWorker)return;activeWorker?.terminate();worker=null;setBusy(false);feedback('The optimizer could not run. Reload the page and try again.',true);};
- try{activeWorker=new Worker('./worker.mjs',{type:'module'});worker=activeWorker;}catch{fail();return;}
- activeWorker.onmessage=({data})=>{
-  if(worker!==activeWorker||version!==revision)return;
-  if(data.progress){renderProgress(data.progress);return;}
-  activeWorker.terminate();worker=null;setBusy(false);
-  if(data.error){feedback(data.error,true);return;}
-  result=data.result;resultProject=snapshot;sheetIndex=0;selected=null;dirty=false;renderResult();persist();
-  $('search-progress').hidden=false;
-  $('search-title').textContent='Best layout ready';
-  $('search-count').textContent=`512 strategies compared in ${((performance.now()-startedAt)/1000).toFixed(1)}s`;
-  if(trigger)toast(result.unplaced.length?`${result.unplaced.length} pieces could not be placed. See the settings warnings.`:`Placed all ${result.sheets.reduce((n,s)=>n+s.parts.length,0)} pieces on ${result.sheets.length} stock ${result.sheets.length===1?'piece':'pieces'}.`);
- };
- activeWorker.onerror=fail;activeWorker.onmessageerror=fail;
- try{activeWorker.postMessage(snapshot);}catch{fail();}
+ const fail=message=>{if(activeWorker&&worker!==activeWorker)return;stopWorker();$('search-progress').hidden=true;feedback(message||'The optimizer could not run. Reload and try again.',true);};
+ try{activeWorker=new Worker('./worker.mjs?v=20261024',{type:'module'});worker=activeWorker;}catch{fail();return;}
+ activeWorker.onmessage=({data})=>{if(worker!==activeWorker||version!==revision)return;if(data.progress){renderProgress(data.progress);if(data.bestResult){latestBest=data.bestResult;$('accept-best').disabled=false;}return;}if(data.error){fail(data.error);return;}finishSearch(data.result);};
+ activeWorker.onerror=()=>fail();activeWorker.onmessageerror=()=>fail();activeWorker.postMessage(searchSnapshot);
 }
-function replaceProject(next){$('clear-notice').hidden=true;$('search-progress').hidden=true;if(worker){worker.terminate();worker=null;setBusy(false);}project=next;revision++;result=null;resultProject=null;dirty=false;sheetIndex=0;selected=null;renderInputs();renderResult();feedback('');persist();}
-function archiveCurrent(){if(!validate(project).length){const found=library.findIndex(p=>p.id===project.id);const saved={...structuredClone(project),updated:new Date().toISOString()};if(found<0)library.unshift(saved);else library[found]=saved;}}
-function download(text,name,type){const url=URL.createObjectURL(new Blob([text],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-const fileName=()=>project.name.replace(/[^\w-]+/g,'-').replace(/^-|-$/g,'').slice(0,60)||'cutlist-project';
-function csvCell(s){const v=String(s);return '"'+(/^[=+\-@\t\r]/.test(v)?"'":'')+v.replaceAll('"','""')+'"';}
+function replaceProject(next){stopWorker();clearedProject=null;undoProject=null;$('edit-notice').hidden=true;project=prepareProject(next);revision++;result=null;resultProject=null;dirty=false;sheetIndex=0;selected=null;latestBest=null;$('clear-notice').hidden=true;$('search-progress').hidden=true;renderInputs();renderResult();feedback('');persist();}
+function archiveCurrent(){if(!validDraft(project))return false;const saved={...structuredClone(project),updated:new Date().toISOString()},found=library.findIndex(p=>p.id===project.id);if(found<0)library.unshift(saved);else library[found]=saved;return true;}
+function askName(title,value,action){$('name-title').textContent=title;$('name-value').value=value;nameAction=action;$('name-dialog').showModal();$('name-value').select();}
+$('name-form').onsubmit=event=>{event.preventDefault();const value=$('name-value').value.trim();if(!value)return;$('name-dialog').close();nameAction?.(value);};
+function download(text,name,type){downloadBlob(new Blob([text],{type}),name);}
+const safeName=name=>String(name).replace(/[^\w-]+/g,'-').replace(/^-|-$/g,'').slice(0,80)||'cutting-plan';
 function exportFile(kind){
  $('export-menu').hidden=true;
- if(kind==='json'){if(validate(project).length){toast('Fix invalid inputs before exporting a project.');return;}download(JSON.stringify(project,null,2),fileName()+'.json','application/json');return;}
- if(kind==='csv'){download(['label,length,width,qty,material,grain,edges,unit',...project.parts.map(p=>[p.label,display(p.length),display(p.width),p.qty,p.material,p.grain,p.edges,project.settings.unit].map(csvCell).join(','))].join('\r\n'),fileName()+'.csv','text/csv');return;}
+ if(kind==='json'){if(!validDraft(project)){toast('Fix invalid inputs before exporting.');return;}download(JSON.stringify(project,null,2),safeName(project.name)+'.json','application/json');return;}
+ if(kind==='csv'||kind==='stock-csv'){download(exportRowsCSV(project[kind==='csv'?'parts':'stock'],project.settings),safeName(project.name)+(kind==='csv'?'-parts':'-stock')+'.csv','text/csv');return;}
  if(!result?.sheets.length||dirty){toast('Optimize your current inputs before exporting a cutting plan.');return;}
- if(kind==='svg'){download(svgSheet(result.sheets[sheetIndex],true,false,'export'),fileName()+`-sheet-${sheetIndex+1}.svg`,'image/svg+xml');return;}
+ if(kind==='svg'){download(sheetSVG(groups[sheetIndex].sheet,drawingProject(),{...diagramView,prefix:'export'}),safeName(project.name)+`-sheet-${groups[sheetIndex].index+1}.svg`,'image/svg+xml');return;}
  if(kind==='print'){
- $('print-content').innerHTML=result.sheets.map((s,i)=>`<section class="print-sheet"><h1>${esc(project.name)} · Sheet ${i+1} / ${result.sheets.length}</h1><p>${esc(s.label)} · ${dimension(s.length)} × ${dimension(s.width)} · Kerf ${dimension(project.settings.kerf)} · Trim ${dimension(project.settings.trim)} per edge · ${s.parts.length} pieces</p>${svgSheet(s,true,false,'print'+i)}<p>Verify all dimensions and grain before cutting. Dimensions are in ${project.settings.unit}. Trim first; cutting coordinates use the original sheet origin.</p></section><section class="print-sheet"><h1>Sheet ${i+1} · Cut sequence</h1><table><thead><tr><th>Step</th><th>Direction</th><th>X</th><th>Y</th><th>Length</th></tr></thead><tbody>${s.cuts.map((c,n)=>`<tr><td>${n+1}</td><td>${c.axis}</td><td>${display(c.x)}</td><td>${display(c.y)}</td><td>${display(c.length)}</td></tr>`).join('')}</tbody></table></section>`).join('')+(result.unplaced.length?`<section class="print-sheet"><h1>Unplaced pieces</h1><p>These pieces were not included in the cutting plan.</p><ul>${result.unplaced.map(p=>`<li>${esc(p.label)} · ${dimension(p.length)} × ${dimension(p.width)}</li>`).join('')}</ul></section>`:'');window.print();
+  $('print-content').innerHTML=groups.map(g=>`<section class="print-sheet"><h1>${esc(project.name||'Cutting plan')} · Sheet ${g.index+1}${g.count>1?` × ${g.count}`:''}</h1><p>${esc(g.sheet.label)} · ${esc(dims(g.sheet.length,g.sheet.width))} · Kerf ${dimension(resultProject.settings.kerf)} · Trim ${dimension(resultProject.settings.trim)}</p>${sheetSVG(g.sheet,drawingProject(),{...diagramView,prefix:'print'+g.index})}</section>`).join('');window.print();return;
  }
+ exportKind=kind;const form=$('export-form');form.elements.filename.value=safeName(project.name);form.elements.header.value=project.name;form.elements.scope.value=kind==='png'?'current':'all';$('export-title').textContent=kind==='png'?'Export sheet images':'Export PDF report';document.querySelectorAll('[data-pdf]').forEach(el=>el.hidden=kind==='png');$('export-status').textContent='';$('export-dialog').showModal();
 }
-async function importCSV(file){
- if(!file)return;if(file.size>1000000){toast('Choose a CSV smaller than 1 MB.');return;}
- try{const rows=parseCSV((await file.text()).replace(/^\uFEFF/,''));const head=rows.shift()?.map(s=>s.trim().toLowerCase());if(!head||!['length','width','qty'].every(k=>head.includes(k)))throw new Error('CSV needs length, width, and qty headers. Optional: label, material, grain, edges, unit.');
- const parts=rows.map((r,i)=>{const get=k=>r[head.indexOf(k)]?.trim()||'';const unit=get('unit')||project.settings.unit;if(!['mm','in'].includes(unit))throw new Error(`Row ${i+2}: unit must be mm or in.`);return {id:uid(),label:get('label')||`Part ${i+1}`,length:parseDimension(get('length'),unit),width:parseDimension(get('width'),unit),qty:Number(get('qty')),material:get('material')||project.stock[0]?.material||'',grain:['true','1','yes'].includes(get('grain').toLowerCase()),edges:get('edges').toUpperCase()};});
- const candidate={...project,parts:[...project.parts,...parts]};const errors=validate(candidate,{draft:true});if(errors.length)throw new Error(errors[0]);project=candidate;changed();renderInputs();toast(`Added ${parts.length} part rows from CSV.`);
- }catch(error){feedback(error.message,true);}finally{$('csv-file').value='';}
+$('export-form').onsubmit=async event=>{
+ event.preventDefault();if(exporting)return;exporting=true;$('export-submit').disabled=true;
+ const values=new FormData(event.target),options=Object.fromEntries(values);options.filename=safeName(options.filename);options.summary=values.has('summary');options.cuts=values.has('cuts');options.date=values.has('date');const chosen=options.scope==='current'?[groups[sheetIndex]]:groups;
+ try{$('export-status').textContent='Preparing your export…';if(exportKind==='pdf')await exportReportPDF({...drawingProject(),name:project.name},result,chosen,options,diagramView,n=>$('export-status').textContent=`Preparing page ${n}…`);else for(const g of chosen)await exportSheetPNG(g,{...drawingProject(),name:project.name},diagramView,options.filename+`-sheet-${g.index+1}`,options);$('export-dialog').close();toast('Export ready.');}catch(error){$('export-status').textContent=error.message;}finally{exporting=false;$('export-submit').disabled=false;}
+};
+function appendRows(text){const rows=importRowsText(text,listType,project.settings),candidate={...project,[listType]:[...project[listType],...rows]},errors=validate(candidate,{draft:true});if(errors.length)throw new Error(errors[0]);rememberEdit(`Added ${rows.length} ${listType} rows.`);project=candidate;changed();renderInputs();toast(`Added ${rows.length} rows.`);}
+function renderProjects(){const query=$('project-search').value.toLowerCase();const shown=library.filter(p=>p.name.toLowerCase().includes(query));$('project-list').innerHTML=shown.map(p=>`<div class="project-entry" data-library-id="${esc(p.id)}"><button class="project-open" data-library-action="open">${esc(p.name||'Untitled project')}<small>${p.parts.length} part rows · ${new Date(p.updated||Date.now()).toLocaleDateString()}</small></button><button class="text-button" data-library-action="rename">Rename</button><button class="icon-button" data-library-action="delete" aria-label="Delete ${esc(p.name||'project')}">×</button></div>`).join('')||'<p class="helper">No saved projects match.</p>';$('undo-library').hidden=!deletedLibrary;}
+function renderLists(){const query=$('list-search').value.toLowerCase();$('lists-title').textContent=`Saved ${listType==='parts'?'part':'stock'} lists`;$('saved-lists').innerHTML=lists.filter(l=>l.type===listType&&l.name.toLowerCase().includes(query)).map(l=>`<div class="project-entry" data-list-id="${esc(l.id)}"><button class="project-open" data-saved-list-action="load">${esc(l.name)}<small>${l.rows.length} rows</small></button><button class="text-button" data-saved-list-action="rename">Rename</button><button class="icon-button" data-saved-list-action="delete" aria-label="Delete ${esc(l.name)}">×</button></div>`).join('')||'<p class="helper">No saved lists match.</p>';$('undo-list-delete').hidden=!deletedList;}
+function runListAction(type,action){
+ listType=type;
+ if(action==='save'){if(validate({...emptyProject(),[type]:project[type]},{draft:true}).length){toast('Fix invalid rows before saving a list.');return;}const rows=structuredClone(project[type]);askName('Save '+(type==='parts'?'part':'stock')+' list','',name=>{lists.unshift({id:uid(),name,type,rows});if(persist())toast('List saved.');});return;}
+ if(action==='load'){$('list-search').value='';renderLists();$('lists-dialog').showModal();return;}
+ if(action==='import'){$('csv-file').click();return;}
+ if(action==='export'){exportFile(type==='parts'?'csv':'stock-csv');return;}
+ if(action==='paste'){$('paste-text').value='';$('paste-error').textContent='';$('paste-dialog').showModal();return;}
+ rememberEdit(`${type==='parts'?'Part':'Stock'} list updated.`);
+ if(action==='clear')project[type]=[];
+ if(action==='enable'||action==='disable')project[type].forEach(p=>p.enabled=action==='enable');
+ if(action==='labels')project[type].forEach(p=>p.label=dims(p.length,p.width));
+ changed();renderInputs();
 }
-function showProjects(){archiveCurrent();persist();$('project-list').innerHTML=library.length?library.map(p=>`<div class="project-entry"><button class="project-open" data-project="${esc(p.id)}">${esc(p.name||'Untitled project')}<small>${p.parts.reduce((s,r)=>s+r.qty,0)} pieces · ${new Date(p.updated||Date.now()).toLocaleDateString()}</small></button><button class="icon-button" data-remove-project="${esc(p.id)}" aria-label="Remove saved ${esc(p.name)}">×</button></div>`).join(''):'<p class="helper">Save a project to keep it here.</p>';$('projects-dialog').showModal();}
-// Delegate row edits so all dynamically added inputs have the same validation path.
+// Delegate edits so imported and newly created rows follow the same rules.
 document.querySelector('.inputs-column').addEventListener('change',event=>{
- const target=event.target,field=target.dataset.field;if(!field)return;const parent=target.closest('[data-type]');const p=project[parent.dataset.type].find(p=>p.id===parent.dataset.id);
- if(['length','width'].includes(field))p[field]=target.value.trim()?parseDimension(target.value,project.settings.unit):null;else if(field==='qty')p[field]=Number(target.value);else if(field==='grain')p[field]=target.checked;else p[field]=target.value;
- changed();if(field==='label')renderDetails();$('part-summary').textContent=`${project.parts.reduce((s,p)=>s+(p.qty||0),0)} pieces · ${project.parts.length} unique parts`;
+ const target=event.target;
+ if(target.dataset.sort){const type=target.dataset.sort,key=target.value;if(!key)return;rememberEdit('List sorted.');project[type].sort((a,b)=>['label','material'].includes(key)?a[key].localeCompare(b[key]):key==='area'?(b.length*b.width)-(a.length*a.width):(b[key]||0)-(a[key]||0));changed();renderInputs();target.value='';return;}
+ const field=target.dataset.field,band=target.dataset.band;if(!field&&!band)return;
+ const parent=target.closest('[data-type]'),p=project[parent.dataset.type].find(p=>p.id===parent.dataset.id);if(!p)return;
+ if(band){p.bands={...edgeBands(p),[band]:target.value.trim()};p.edges='';}
+ else if(['length','width'].includes(field)){const n=parseDimension(target.value,project.settings.unit);p[field]=target.value.trim()?(Number.isFinite(n)?n:target.value):null;}
+ else if(field==='qty')p.qty=Number(target.value);else if(field==='enabled')p.enabled=target.checked;else p[field]=target.value;
+ changed();if(field==='label')renderDetails();if(field==='enabled')renderInputs();else $('part-summary').textContent=`${activeRows(project.parts).reduce((n,p)=>n+(p.qty||0),0)} enabled pieces · ${project.parts.length} rows`;
 });
-document.querySelector('.inputs-column').addEventListener('click',event=>{const btn=event.target.closest('[data-delete]');if(!btn)return;const parent=btn.closest('[data-type]');project[parent.dataset.type]=project[parent.dataset.type].filter(p=>p.id!==parent.dataset.id);changed();renderInputs();});
-$('add-part').onclick=()=>{project.parts.push({id:uid(),label:'',length:null,width:null,qty:1,material:project.stock[0]?.material||'',grain:false,edges:''});changed();renderInputs();$('parts-body').lastElementChild.querySelector('input').focus();};
-$('add-stock').onclick=()=>{project.stock.push({id:uid(),label:'',length:null,width:null,qty:1,material:project.stock[0]?.material||''});changed();renderInputs();$('stock-body').lastElementChild.querySelector('input').focus();};
+document.querySelector('.inputs-column').addEventListener('click',event=>{
+ const action=event.target.closest('[data-list-action]');if(action){runListAction(action.closest('[data-list]').dataset.list,action.dataset.listAction);return;}
+ const btn=event.target.closest('[data-delete],[data-duplicate]');if(!btn)return;const parent=btn.closest('[data-type]'),type=parent.dataset.type;
+ rememberEdit(btn.hasAttribute('data-delete')?'Row removed.':'Row duplicated.');if(btn.hasAttribute('data-delete'))project[type]=project[type].filter(p=>p.id!==parent.dataset.id);else{if(project[type].length>=1000){toast('Use at most 1,000 rows.');return;}const row=project[type].find(p=>p.id===parent.dataset.id);project[type].push({...structuredClone(row),id:uid()});}changed();renderInputs();
+});
+for(const [id,type] of [['add-part','parts'],['add-stock','stock']])$(id).onclick=()=>{if(project[type].length>=1000){toast('Use at most 1,000 rows.');return;}project[type].push(blankRow(type,project.stock[0]?.material||''));changed();renderInputs();$(type+'-body').lastElementChild.querySelector('.name-input').focus();};
 $('project-name').onchange=event=>{project.name=event.target.value.trim();persist();};
-$('unit').onchange=event=>{project.settings.unit=event.target.value;renderInputs();renderResult();persist();};
-for(const key of ['kerf','trim'])$(key).onchange=event=>{project.settings[key]=parseDimension(event.target.value,project.settings.unit);changed();};
+for(const key of ['unit','precision','dimensionOrder','groupLayouts'])$(key).onchange=event=>{project.settings[key]=key==='groupLayouts'?event.target.checked:key==='precision'?Number(event.target.value):event.target.value;renderInputs();renderResult();persist();};
+for(const key of ['kerf','trim','minTrim'])$(key).onchange=event=>{const n=parseDimension(event.target.value,project.settings.unit);project.settings[key]=Number.isFinite(n)?n:event.target.value;changed();};
 for(const key of ['rotation','materials','singleSheet'])$(key).onchange=event=>{project.settings[key]=event.target.checked;changed();};
-$('priority').onchange=event=>{project.settings.priority=event.target.value;changed();};
-$('optimize').onclick=calculate;
-$('layout-tab').onclick=()=>{view='layout';renderResult();};$('cuts-tab').onclick=()=>{view='cuts';renderResult();};$('labels').onchange=renderResult;
-$('sheet-tabs').onclick=event=>{const button=event.target.closest('[data-sheet]');if(button){sheetIndex=Number(button.dataset.sheet);renderResult();}};
-function selectPiece(event){const el=event.target.closest('[data-piece]');if(!el)return;selected=selected===el.dataset.piece?null:el.dataset.piece;renderResult();const p=resultProject.parts.find(p=>p.id===el.dataset.piece);toast(`${p.label} · ${dimension(p.length)} × ${dimension(p.width)}${p.edges?' · Banding: '+p.edges:''}`);}
-$('plan-content').onclick=selectPiece;$('plan-content').onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();selectPiece(event);}};
-$('export-btn').onclick=()=>{$('export-menu').hidden=!$('export-menu').hidden;};
-document.addEventListener('click',event=>{const btn=event.target.closest('[data-export]');if(btn)exportFile(btn.dataset.export);if(!event.target.closest('.export-wrap'))$('export-menu').hidden=true;});
-$('save-btn').onclick=()=>{if(validate(project).length){toast('Fix invalid inputs before saving a project.');return;}archiveCurrent();if(persist())toast('Project saved in your library.');};
-$('projects-btn').onclick=showProjects;
-$('project-list').onclick=event=>{const open=event.target.closest('[data-project]'),remove=event.target.closest('[data-remove-project]');if(open){const p=library.find(p=>p.id===open.dataset.project);replaceProject(structuredClone(p));$('projects-dialog').close();calculate();}if(remove){library=library.filter(p=>p.id!==remove.dataset.removeProject);persist();remove.closest('.project-entry').remove();toast('Removed from saved projects. Your current draft is still available.');}};
+for(const key of ['priority','cutDirection'])$(key).onchange=event=>{project.settings[key]=event.target.value;changed();};
+$('optimize').onclick=calculate;$('accept-best').onclick=()=>{if(worker&&latestBest)finishSearch(latestBest,true);};
+$('layout-tab').onclick=()=>{view='layout';renderResult();};$('cuts-tab').onclick=()=>{view='cuts';renderResult();};$('labels').onchange=event=>{diagramView.labels=event.target.checked;renderResult();};
+$('view-options-btn').onclick=()=>{$('view-options').hidden=!$('view-options').hidden;$('view-options-btn').setAttribute('aria-expanded',!$('view-options').hidden);};
+document.querySelectorAll('[data-view]').forEach(el=>el.onchange=()=>{diagramView[el.dataset.view]=el.checked;renderResult();});
+$('font-scale').onchange=event=>{diagramView.fontScale=Number(event.target.value);renderResult();};$('rotate-view').onclick=()=>{diagramView.rotation=(diagramView.rotation+90)%360;renderResult();};
+$('zoom').oninput=event=>{zoom=Number(event.target.value);$('zoom-value').textContent=zoom+'%';renderResult();};$('reset-view').onclick=()=>{zoom=100;diagramView.rotation=0;$('zoom').value=100;$('zoom-value').textContent='100%';renderResult();};
+$('sheet-tabs').onclick=event=>{const btn=event.target.closest('[data-sheet]');if(btn){sheetIndex=Number(btn.dataset.sheet);selected=null;renderResult();}};
+function selectPiece(event){const el=event.target.closest('[data-piece]');if(!el)return;selected=selected===el.dataset.piece?null:el.dataset.piece;const p=groups[sheetIndex].sheet.parts.find(p=>`${p.id}:${p.copy}`===el.dataset.piece);renderResult();if(p)toast(`${p.label||'Part'} · ${dims(p.length,p.width)}${Object.values(edgeBands(p)).some(Boolean)?' · Bands: '+Object.entries(edgeBands(p)).filter(([,v])=>v).map(([s,v])=>s+' '+v).join(', '):''}`);}
+let suppressClick=false;
+$('plan-content').onclick=event=>{if(suppressClick){suppressClick=false;return;}selectPiece(event);};$('plan-content').onkeydown=event=>{if((event.key==='Enter'||event.key===' ')&&event.target.closest('[data-piece]')){event.preventDefault();selectPiece(event);}};
+$('plan-content').onpointerdown=event=>{const viewport=event.target.closest('.drawing-viewport');if(!viewport||zoom===100||event.button!==0)return;pan={x:event.clientX,y:event.clientY,left:viewport.scrollLeft,top:viewport.scrollTop,viewport};};
+$('plan-content').onpointermove=event=>{if(!pan)return;const dx=event.clientX-pan.x,dy=event.clientY-pan.y;if(Math.abs(dx)+Math.abs(dy)>5){suppressClick=true;pan.viewport.scrollLeft=pan.left-dx;pan.viewport.scrollTop=pan.top-dy;}};
+window.addEventListener('pointerup',()=>pan=null);window.addEventListener('pointercancel',()=>pan=null);
+$('export-btn').onclick=()=>{$('export-menu').hidden=!$('export-menu').hidden;};document.addEventListener('click',event=>{const btn=event.target.closest('[data-export]');if(btn)exportFile(btn.dataset.export);if(!event.target.closest('.export-wrap'))$('export-menu').hidden=true;});
+$('save-btn').onclick=()=>{if(!archiveCurrent()){toast('Fix invalid inputs before saving.');return;}if(persist())toast('Project saved in your library.');};
+$('save-as-btn').onclick=()=>{if(!validDraft(project)){toast('Fix invalid inputs before saving.');return;}askName('Save project as',project.name,name=>{project={...structuredClone(project),id:uid(),name};archiveCurrent();renderInputs();if(persist())toast('New project copy saved.');});};
+$('projects-btn').onclick=()=>{$('project-search').value='';renderProjects();$('projects-dialog').showModal();};$('project-search').oninput=renderProjects;
+$('project-list').onclick=event=>{const btn=event.target.closest('[data-library-action]');if(!btn)return;const id=btn.closest('[data-library-id]').dataset.libraryId,p=library.find(p=>p.id===id);if(!p)return;const action=btn.dataset.libraryAction;if(action==='open'){archiveCurrent();replaceProject(structuredClone(p));$('projects-dialog').close();}if(action==='delete'){deletedLibrary=p;library=library.filter(p=>p.id!==id);persist();renderProjects();}if(action==='rename')askName('Rename project',p.name,name=>{p.name=name;if(project.id===id){project.name=name;$('project-name').value=name;}persist();renderProjects();});};
+$('undo-library').onclick=()=>{if(deletedLibrary){library.unshift(deletedLibrary);deletedLibrary=null;persist();renderProjects();}};
+$('list-search').oninput=renderLists;
+$('saved-lists').onclick=event=>{const btn=event.target.closest('[data-saved-list-action]');if(!btn)return;const id=btn.closest('[data-list-id]').dataset.listId,l=lists.find(l=>l.id===id);if(!l)return;const action=btn.dataset.savedListAction;if(action==='load'){rememberEdit('Saved list loaded.');project[l.type]=l.rows.map(row=>({...structuredClone(row),id:uid()}));changed();renderInputs();$('lists-dialog').close();}if(action==='delete'){deletedList=l;lists=lists.filter(l=>l.id!==id);persist();renderLists();}if(action==='rename')askName('Rename list',l.name,name=>{l.name=name;persist();renderLists();});};
+$('undo-list-delete').onclick=()=>{if(deletedList){lists.unshift(deletedList);deletedList=null;persist();renderLists();}};
 $('new-project').onclick=()=>{archiveCurrent();replaceProject(emptyProject(project.settings.unit));$('projects-dialog').close();$('project-name').focus();};
-$('clear-btn').onclick=()=>{clearedProject=structuredClone(project);replaceProject(emptyProject(project.settings.unit));$('clear-notice').hidden=false;$('project-name').focus();};
-$('undo-clear').onclick=()=>{if(!clearedProject)return;const previous=clearedProject;clearedProject=null;replaceProject(previous);toast('Project restored. Optimize when you’re ready.');};
+$('clear-btn').onclick=()=>{const previous=structuredClone(project);replaceProject(emptyProject(project.settings.unit));clearedProject=previous;undoProject=null;$('edit-notice').hidden=true;$('clear-notice').hidden=false;};$('undo-clear').onclick=()=>{if(clearedProject){const previous=clearedProject;clearedProject=null;replaceProject(previous);toast('Project restored.');}};
+$('undo-edit').onclick=()=>{if(undoProject){project=undoProject;undoProject=null;changed();renderInputs();renderResult();$('edit-notice').hidden=true;}};$('dismiss-undo').onclick=()=>{$('edit-notice').hidden=true;undoProject=null;};
 $('sample-btn').onclick=()=>{archiveCurrent();replaceProject(sampleProject());toast('Sample loaded. Choose Optimize layout to explore it.');};
-$('help-btn').onclick=()=>$('help-dialog').showModal();document.querySelectorAll('[data-close]').forEach(btn=>btn.onclick=()=>btn.closest('dialog').close());
-$('import-btn').onclick=()=>{$('csv-file').click();toast('CSV headers: label, length, width, qty, material, grain, edges, unit.');};$('csv-file').onchange=event=>importCSV(event.target.files[0]);
-$('load-file').onclick=()=>$('project-file').click();$('project-file').onchange=async event=>{const file=event.target.files[0];if(!file)return;try{if(file.size>1000000)throw new Error('Choose a project smaller than 1 MB.');const next=JSON.parse(await file.text());const errors=validate(next);if(errors.length)throw new Error(errors[0]);if(next.version!==1)throw new Error('Unsupported project version.');archiveCurrent();replaceProject({...next,id:uid(),name:String(next.name||'Imported project').slice(0,80)});$('projects-dialog').close();calculate();toast('Project imported.');}catch(error){toast(error.message);}finally{event.target.value='';}};
-document.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();calculate(true);}if(event.key==='Escape')$('export-menu').hidden=true;});
+$('help-btn').onclick=()=>$('help-dialog').showModal();document.querySelectorAll('[data-close]').forEach(btn=>btn.onclick=()=>{if(btn.closest('dialog').id==='export-dialog'&&exporting)return;btn.closest('dialog').close();});$('export-dialog').addEventListener('cancel',event=>{if(exporting)event.preventDefault();});
+$('import-btn').onclick=()=>runListAction('parts','import');$('csv-file').onchange=async event=>{const file=event.target.files[0];if(!file)return;try{if(file.size>2000000)throw new Error('Choose a file smaller than 2 MB.');appendRows(await file.text());}catch(error){feedback(error.message,true);}finally{event.target.value='';}};
+$('paste-apply').onclick=()=>{try{appendRows($('paste-text').value);$('paste-dialog').close();}catch(error){$('paste-error').textContent=error.message;}};
+$('load-file').onclick=()=>$('project-file').click();$('project-file').onchange=async event=>{const file=event.target.files[0];if(!file)return;try{if(file.size>4000000)throw new Error('Choose a project smaller than 4 MB.');const next=JSON.parse(await file.text());const errors=validate(next,{draft:true});if(errors.length)throw new Error(errors[0]);if(next.version!==1)throw new Error('Unsupported project version.');archiveCurrent();replaceProject({...next,id:uid(),name:String(next.name||'Imported project').slice(0,80)});$('projects-dialog').close();toast('Project imported.');}catch(error){toast(error.message);}finally{event.target.value='';}};
+document.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key==='Enter'&&!document.querySelector('dialog[open]')){event.preventDefault();calculate();}if(event.key==='Escape')$('export-menu').hidden=true;});
 renderInputs();renderResult();persist();

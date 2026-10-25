@@ -1,4 +1,4 @@
-import {validate} from './optimizer.mjs';
+import {validate} from './optimizer.mjs?v=20261024';
 const uid=()=>crypto.randomUUID();
 export function sampleProject(){return ({version:1,id:uid(),name:'The weekend bookcase',parts:[['Side panels',720,380,2],['Shelves',564,360,4],['Doors',716,296,2],['Top & base',600,400,2]].map(([label,length,width,qty])=>({id:uid(),label,length,width,qty,material:'Birch plywood',grain:false,edges:''})),stock:[{id:uid(),label:'Birch plywood',length:2440,width:1220,qty:3,material:'Birch plywood'}],settings:{unit:'mm',kerf:3,trim:5,rotation:true,materials:true,singleSheet:false,priority:'material'}});}
 
